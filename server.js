@@ -89,6 +89,29 @@ function scanAntigravitySubagents() {
   return results;
 }
 
+function notifyWindows(title, message) {
+  if (process.env.DECK_NO_NOTIFY === '1') return;
+  const safeTitle = String(title || '/deck').replace(/'/g, "''").slice(0, 60);
+  const safeMsg = String(message || 'Tarea finalizada').replace(/'/g, "''").slice(0, 140);
+  const ps = `
+    Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+    [System.Media.SystemSounds]::Asterisk.Play()
+    $n = New-Object System.Windows.Forms.NotifyIcon
+    $n.Icon = [System.Drawing.SystemIcons]::Information
+    $n.Visible = $true
+    $n.ShowBalloonTip(4000, '${safeTitle}', '${safeMsg}', [System.Windows.Forms.ToolTipIcon]::Info)
+    Start-Sleep -Milliseconds 4500
+    $n.Dispose()
+  `;
+  try {
+    spawn('powershell.exe', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', ps], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true
+    }).unref();
+  } catch {}
+}
+
 function serializePane(p) {
   return {
     id: p.id,
@@ -101,6 +124,7 @@ function serializePane(p) {
     groupMeta: GROUPS[p.group] || GROUPS.isolated,
     status: p.status,
     attention: p.attention,
+    done: Boolean(p.done),
     remoteControl: p.remoteControl,
     lastLine: p.lastLine,
     subagents: p.subagents,
@@ -174,6 +198,9 @@ function createPane(opts = {}) {
     group,
     status: 'Running',
     attention: false,
+    done: false,
+    outputBytes: 0,
+    notified: false,
     remoteControl,
     lastLine: 'Iniciando terminal...',
     subagents: Array.isArray(opts.subagents) ? opts.subagents : [],
@@ -189,14 +216,21 @@ function createPane(opts = {}) {
 
   const onOutput = (raw) => {
     pane.buffer = (pane.buffer + raw).slice(-40000);
+    pane.outputBytes += raw.length;
     pane.status = 'Running';
+    pane.done = false;
     const clean = stripAnsi(raw);
     const det = detectAttention(clean);
     if (det && det.lastLine) {
       pane.lastLine = det.lastLine;
-      if (det.needsAttention) {
+      if (det.needsAttention && !/^[A-Z]:\\.*>$/i.test(det.lastLine)) {
         pane.attention = true;
         pane.status = 'Waiting';
+        if (!pane.notified) {
+          pane.notified = true;
+          events.emit('alert', { id: pane.id, kind: 'waiting' });
+          notifyWindows(`/deck · ${pane.role}`, `Esperando confirmación: ${pane.lastLine}`);
+        }
       }
     }
     const subMatch = clean.match(/(?:invoke_subagent|subagent|Subagent)\s*[:\-]?\s*([a-zA-Z0-9_-]+)/);
@@ -206,8 +240,15 @@ function createPane(opts = {}) {
 
     clearTimeout(pane.idleTimer);
     pane.idleTimer = setTimeout(() => {
-      pane.status = 'Waiting';
-      pane.attention = true;
+      if (pane.status === 'Waiting') return;
+      pane.status = 'Done';
+      pane.done = true;
+      pane.attention = false;
+      if (pane.outputBytes > 250 && !pane.notified) {
+        pane.notified = true;
+        events.emit('alert', { id: pane.id, kind: 'done' });
+        notifyWindows(`/deck · ${pane.role} terminó`, pane.lastLine || 'CLI listo para revisar');
+      }
       flushQueue(pane);
       broadcastState();
     }, 3500);

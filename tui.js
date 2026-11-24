@@ -10,6 +10,7 @@ const RGB = {
   C: '168;85;247',
   D: '244;63;94',
   blue: '59;130;246',
+  green: '16;185;129',
   muted: '142;146;159',
   border: '52;56;68',
   focus: '203;213;225',
@@ -48,6 +49,10 @@ events.on('output', ({ id, data }) => {
   if (!p) return;
   const term = ensureXterm(p);
   term.write(data, () => scheduleRender());
+});
+
+events.on('alert', () => {
+  process.stdout.write('\x07');
 });
 
 events.on('state', () => {
@@ -168,13 +173,15 @@ function render() {
 
   const paneList = Array.from(panes.values());
   const waitingCount = paneList.filter(p => p.attention).length;
+  const doneCount = paneList.filter(p => p.done).length;
 
   let out = '\x1b[?25l'; // hide cursor during paint
 
   // 1. Topbar (Row 1)
-  const alertTxt = waitingCount > 0 ? bg(RGB.blue, bold(` ${waitingCount} esperando `)) + ' ' : '';
+  const alertTxt = (waitingCount > 0 ? bg(RGB.blue, bold(` ${waitingCount} esperando `)) + ' ' : '') +
+                   (doneCount > 0 ? bg(RGB.green, bold(` ${doneCount} listo `)) + ' ' : '');
   const topLeft = ` ${bold('/deck')} ${alertTxt}${fg(RGB.muted, '[F2]+Term [F3]+agy [F4]+agy-RC [F5]Grupo [F6]Rol [F7]Msg [F8]Cerrar [Ctrl+Q]Salir')}`;
-  out += moveTo(1, 1) + bg(RGB.bgTop, trunc(topLeft, cols + 30));
+  out += moveTo(1, 1) + bg(RGB.bgTop, trunc(topLeft, cols + 40));
 
   // 2. Sidebar (Cols 1..sidebarW, Rows 2..rows-1)
   lastSidebarCards = [];
@@ -185,7 +192,8 @@ function render() {
     const gColor = RGB[p.group] || RGB.isolated;
     const isFocus = p.id === focusedId;
     const cardBg = isFocus ? RGB.bgActive : RGB.bgCard;
-    const bar = p.attention ? fg(RGB.blue, '┃') : fg(gColor, '┃');
+    const highlightColor = p.done ? RGB.green : p.attention ? RGB.blue : null;
+    const bar = highlightColor ? fg(highlightColor, '┃') : fg(gColor, '┃');
     const titleStr = `[${p.num}] ${p.role}`;
     const pill = bg(gColor, ` ${gMeta.label} `);
     const innerW = sidebarW - 2;
@@ -193,10 +201,10 @@ function render() {
 
     out += moveTo(sRow, 1) + bar + bg(cardBg, trunc(titleStr, padTitle) + pill) + fg(RGB.border, '│');
     const subTxt = p.subagents && p.subagents.length ? `↳ ${p.subagents.join(', ')}` : (p.lastLine || 'Listo');
-    out += moveTo(sRow + 1, 1) + bar + bg(cardBg, fg(p.attention ? RGB.blue : RGB.muted, trunc(subTxt, innerW))) + fg(RGB.border, '│');
+    out += moveTo(sRow + 1, 1) + bar + bg(cardBg, fg(highlightColor || RGB.muted, trunc(subTxt, innerW))) + fg(RGB.border, '│');
     const metaTxt = `${p.status}${p.remoteControl ? '·RC' : ''} ${p.branch ? '· ' + p.branch : ''}`;
     out += moveTo(sRow + 2, 1) + bar + bg(cardBg, fg(RGB.muted, trunc(metaTxt, innerW))) + fg(RGB.border, '│');
-    out += moveTo(sRow + 3, 1) + fg(p.attention ? RGB.blue : RGB.border, '─'.repeat(sidebarW - 1) + '┤');
+    out += moveTo(sRow + 3, 1) + fg(highlightColor || RGB.border, '─'.repeat(sidebarW - 1) + '┤');
 
     lastSidebarCards.push({ id: p.id, rStart: sRow, rEnd: sRow + 3 });
     sRow += 4;
@@ -223,7 +231,7 @@ function render() {
     }
 
     const isFocus = pane.id === focusedId;
-    const borderRgb = pane.attention ? RGB.blue : isFocus ? RGB.focus : RGB.border;
+    const borderRgb = pane.done ? RGB.green : pane.attention ? RGB.blue : isFocus ? RGB.focus : RGB.border;
     const gColor = RGB[pane.group] || RGB.isolated;
     const gLabel = (GROUPS[pane.group] || GROUPS.isolated).label;
 
@@ -273,7 +281,7 @@ function handleMouse(str) {
     if (row >= card.rStart && row <= card.rEnd && col <= 30) {
       focusedId = card.id;
       const p = panes.get(focusedId);
-      if (p) p.attention = false;
+      if (p) { p.attention = false; p.done = false; p.notified = false; }
       scheduleRender();
       return true;
     }
@@ -282,7 +290,7 @@ function handleMouse(str) {
     if (col >= box.c && col < box.c + box.w && row >= box.r && row < box.r + box.h) {
       focusedId = box.id;
       const p = panes.get(focusedId);
-      if (p) p.attention = false;
+      if (p) { p.attention = false; p.done = false; p.notified = false; }
       scheduleRender();
       return true;
     }
@@ -385,6 +393,8 @@ function handleKeyInput(buf) {
   const p = panes.get(focusedId);
   if (p) {
     p.attention = false;
+    p.done = false;
+    p.notified = false;
     p.status = 'Running';
     p.write(str);
   }
