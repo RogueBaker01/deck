@@ -76,23 +76,31 @@ assert.strictEqual(restoredList[0].conversationId, 'conv-111');
 assert.strictEqual(restoredList[1].conversationId, 'conv-222');
 assert.strictEqual(restoredList[1].remoteControl, true);
 
-// 7. Model usage scanner aggregates today's tokens per model accurately
+// 7. Model usage scanner aggregates today's and 7-day weekly tokens per model accurately
 const tmpBrain = fs.mkdtempSync(path.join(os.tmpdir(), 'deck-brain-'));
 const convLogDir = path.join(tmpBrain, 'conv-test-1', '.system_generated', 'logs');
 fs.mkdirSync(convLogDir, { recursive: true });
-const nowIso = new Date().toISOString();
+const nowMs = Date.now();
+const nowIso = new Date(nowMs).toISOString();
+const threeDaysAgoIso = new Date(nowMs - 3 * 86400000).toISOString();
+const tenDaysAgoIso = new Date(nowMs - 10 * 86400000).toISOString();
 fs.writeFileSync(path.join(convLogDir, 'transcript.jsonl'), [
   JSON.stringify({ model: 'gemini-4-carbon-medium', input_tokens: 12000, output_tokens: 3000, cache_read_tokens: 50000, created_at: nowIso }),
   JSON.stringify({ model: 'gemini-4-carbon-medium', input_tokens: 8000, output_tokens: 2000, cache_read_tokens: 60000, created_at: nowIso }),
-  JSON.stringify({ model: 'gemini-4-hydrogen-high', input_tokens: 4000, output_tokens: 1000, cache_read_tokens: 0, created_at: nowIso })
+  JSON.stringify({ model: 'gemini-4-hydrogen-high', input_tokens: 4000, output_tokens: 1000, cache_read_tokens: 0, created_at: nowIso }),
+  JSON.stringify({ model: 'gemini-4-hydrogen-high', input_tokens: 9000, output_tokens: 1000, cache_read_tokens: 0, created_at: threeDaysAgoIso }),
+  JSON.stringify({ model: 'gemini-4-argon-medium', input_tokens: 50000, output_tokens: 5000, cache_read_tokens: 0, created_at: tenDaysAgoIso })
 ].join('\n'));
-const usage = scanModelUsage({ brainDirs: [tmpBrain], sinceMs: 0 });
-assert.strictEqual(usage.models.length, 2, 'Should detect 2 distinct models');
+const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+const usage = scanModelUsage({ brainDirs: [tmpBrain], sinceMs: startOfToday.getTime(), weekSinceMs: nowMs - 7 * 86400000 });
+assert.strictEqual(usage.models.length, 2, 'Today should detect 2 distinct models');
 assert.strictEqual(usage.models[0].label, 'G4 Carbon (M)');
 assert.strictEqual(usage.models[0].turns, 2);
 assert.strictEqual(usage.models[0].activeTokens, 25000);
 assert.strictEqual(usage.models[1].label, 'G4 Hydrogen (H)');
 assert.strictEqual(usage.models[1].activeTokens, 5000);
+assert.strictEqual(usage.week.models.length, 2, '7-day week should exclude 10-day-old entries');
+assert.strictEqual(usage.week.totalActive, 40000, '7-day week should total 40k active tokens');
 assert.strictEqual(formatCompactTokens(25000), '25k');
 assert.strictEqual(formatModelName('claude-sonnet-5-5-medium').label, 'Sonnet 5.5 (M)');
 fs.rmSync(tmpBrain, { recursive: true, force: true });

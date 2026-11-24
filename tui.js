@@ -300,17 +300,17 @@ function render() {
   }
   if (sRow + 2 < rows) {
     const usage = scanModelUsage();
-    const uHdr = ` Consumo Hoy · ${formatCompactTokens(usage.totalActive)} tok`;
-    out += moveTo(sRow, 1) + fg(RGB.focus, bold(trunc(uHdr, sidebarW - 1))) + fg(RGB.border, '│');
-    sRow++;
-    if (!usage.models.length) {
-      out += moveTo(sRow, 1) + fg(RGB.muted, trunc(' Sin actividad hoy', sidebarW - 1)) + fg(RGB.border, '│');
+    const renderUsageBlock = (title, summary, maxItems) => {
+      if (sRow + 1 >= rows) return;
+      out += moveTo(sRow, 1) + fg(RGB.focus, bold(trunc(` ${title} · ${formatCompactTokens(summary.totalActive)} tok`, sidebarW - 1))) + fg(RGB.border, '│');
       sRow++;
-    } else {
-      const reserveForComm = commLog.length > 0 && (rows - sRow) >= 8 ? 4 : 0;
-      const maxModels = Math.max(1, Math.floor((rows - sRow - reserveForComm) / 2));
-      for (const m of usage.models.slice(0, maxModels)) {
-        if (sRow + 1 >= rows) break;
+      if (!summary.models.length) {
+        out += moveTo(sRow, 1) + fg(RGB.muted, trunc(' Sin actividad', sidebarW - 1)) + fg(RGB.border, '│');
+        sRow++;
+        return;
+      }
+      for (const m of summary.models.slice(0, maxItems)) {
+        if (sRow >= rows) break;
         const mCol = MODEL_FAMILY_RGB[m.family] || RGB.focus;
         const rightTxt = `${formatCompactTokens(m.activeTokens)}·${m.turns}t`;
         if (sidebarW - 4 > rightTxt.length + 4) {
@@ -321,18 +321,25 @@ function render() {
         } else {
           out += moveTo(sRow, 1) + ' ' + fg(mCol, '•') + fg(RGB.focus, trunc(` ${m.label} ${rightTxt}`, sidebarW - 3)) + fg(RGB.border, '│');
         }
-        const barW = 5;
-        const filled = Math.max(1, Math.min(barW, Math.round(m.share * barW)));
-        const barStr = fg(mCol, '█'.repeat(filled)) + fg(RGB.border, '░'.repeat(barW - filled));
-        const detailRaw = sidebarW >= 34
-          ? ` in:${formatCompactTokens(m.inputTokens)} out:${formatCompactTokens(m.outputTokens)} ca:${formatCompactTokens(m.cacheTokens)}`
-          : ` in:${formatCompactTokens(m.inputTokens)} out:${formatCompactTokens(m.outputTokens)}`;
-        const detailW = Math.max(1, sidebarW - 8);
-        out += moveTo(sRow + 1, 1) + '  ' + barStr + fg(RGB.muted, trunc(detailRaw, detailW)) + fg(RGB.border, '│');
-        sRow += 2;
+        sRow++;
+        if (sRow < rows && maxItems <= 3) {
+          const barW = 5;
+          const filled = Math.max(1, Math.min(barW, Math.round(m.share * barW)));
+          const barStr = fg(mCol, '█'.repeat(filled)) + fg(RGB.border, '░'.repeat(barW - filled));
+          const detailRaw = sidebarW >= 34
+            ? ` in:${formatCompactTokens(m.inputTokens)} out:${formatCompactTokens(m.outputTokens)} ca:${formatCompactTokens(m.cacheTokens)}`
+            : ` in:${formatCompactTokens(m.inputTokens)} out:${formatCompactTokens(m.outputTokens)}`;
+          out += moveTo(sRow, 1) + '  ' + barStr + fg(RGB.muted, trunc(detailRaw, Math.max(1, sidebarW - 8))) + fg(RGB.border, '│');
+          sRow++;
+        }
       }
+    };
+
+    renderUsageBlock('Consumo Hoy', usage, Math.min(3, Math.max(1, Math.floor((rows - sRow) / 4))));
+    if (sRow + 2 < rows && usage.week) {
+      renderUsageBlock('Semana (7d)', usage.week, Math.min(3, Math.max(1, Math.floor((rows - sRow) / 3))));
     }
-    if (sRow + 2 < rows) {
+    if (sRow + 1 < rows) {
       out += moveTo(sRow, 1) + fg(RGB.border, '─'.repeat(sidebarW - 1) + '┤');
       sRow++;
     }

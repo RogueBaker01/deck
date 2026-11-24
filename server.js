@@ -140,72 +140,10 @@ function formatModelName(rawModel) {
   return { label: id.replace(/^gemini-/i, 'G-').slice(0, 20), family };
 }
 
-function scanModelUsage(opts = {}) {
-  const now = Date.now();
-  const customDirs = Array.isArray(opts.brainDirs) ? opts.brainDirs : null;
-  if (!customDirs && !opts.force && cachedUsageResult && now - lastUsageScanAt < 3000) {
-    return cachedUsageResult;
-  }
-
-  const startOfDay = new Date();
-  startOfDay.setHours(0, 0, 0, 0);
-  const startMs = opts.sinceMs !== undefined ? opts.sinceMs : startOfDay.getTime();
-  const dayKey = `${startOfDay.getFullYear()}-${startOfDay.getMonth()}-${startOfDay.getDate()}`;
-  const dirs = customDirs || BRAIN_DIRS;
-  const totals = new Map();
-
-  for (const brainDir of dirs) {
-    if (!fs.existsSync(brainDir)) continue;
-    let convDirs = [];
-    try { convDirs = fs.readdirSync(brainDir, { withFileTypes: true }); } catch { continue; }
-
-    for (const d of convDirs) {
-      if (!d.isDirectory()) continue;
-      const tPath = path.join(brainDir, d.name, '.system_generated', 'logs', 'transcript.jsonl');
-      let mtimeMs = 0;
-      try { mtimeMs = fs.statSync(tPath).mtimeMs; } catch { continue; }
-      if (mtimeMs < startMs) continue;
-
-      let fileSummary = !customDirs ? usageFileCache.get(tPath) : null;
-      if (!fileSummary || fileSummary.mtimeMs !== mtimeMs || fileSummary.dayKey !== dayKey) {
-        const perModel = {};
-        try {
-          const lines = fs.readFileSync(tPath, 'utf8').split('\n');
-          for (const line of lines) {
-            if (!line.includes('"model"')) continue;
-            let entry;
-            try { entry = JSON.parse(line); } catch { continue; }
-            if (!entry || !entry.model) continue;
-            if (entry.created_at) {
-              const ts = Date.parse(entry.created_at);
-              if (!Number.isNaN(ts) && ts < startMs) continue;
-            }
-            const m = entry.model;
-            if (!perModel[m]) perModel[m] = { turns: 0, in: 0, out: 0, cache: 0 };
-            perModel[m].turns += 1;
-            perModel[m].in += Number(entry.input_tokens || 0);
-            perModel[m].out += Number(entry.output_tokens || 0);
-            perModel[m].cache += Number(entry.cache_read_tokens || 0);
-          }
-        } catch { continue; }
-        fileSummary = { mtimeMs, dayKey, perModel };
-        if (!customDirs) usageFileCache.set(tPath, fileSummary);
-      }
-
-      for (const [m, s] of Object.entries(fileSummary.perModel)) {
-        const cur = totals.get(m) || { turns: 0, in: 0, out: 0, cache: 0 };
-        cur.turns += s.turns;
-        cur.in += s.in;
-        cur.out += s.out;
-        cur.cache += s.cache;
-        totals.set(m, cur);
-      }
-    }
-  }
-
+function buildUsageSummary(totalsMap) {
   let totalIn = 0, totalOut = 0, totalCache = 0, totalTurns = 0;
   const models = [];
-  for (const [id, s] of totals.entries()) {
+  for (const [id, s] of totalsMap.entries()) {
     const activeTokens = s.in + s.out;
     totalIn += s.in;
     totalOut += s.out;
@@ -224,21 +162,87 @@ function scanModelUsage(opts = {}) {
       totalTokens: activeTokens + s.cache
     });
   }
-
   models.sort((a, b) => b.activeTokens - a.activeTokens || b.turns - a.turns);
   const maxActive = models.length ? Math.max(1, models[0].activeTokens) : 1;
-  for (const m of models) {
-    m.share = Math.min(1, m.activeTokens / maxActive);
+  for (const m of models) m.share = Math.min(1, m.activeTokens / maxActive);
+  return { totalIn, totalOut, totalCache, totalActive: totalIn + totalOut, totalTurns, models };
+}
+
+function addUsageBucket(map, model, stats) {
+  const cur = map.get(model) || { turns: 0, in: 0, out: 0, cache: 0 };
+  cur.turns += stats.turns;
+  cur.in += stats.in;
+  cur.out += stats.out;
+  cur.cache += stats.cache;
+  map.set(model, cur);
+}
+
+function scanModelUsage(opts = {}) {
+  const now = Date.now();
+  const customDirs = Array.isArray(opts.brainDirs) ? opts.brainDirs : null;
+  if (!customDirs && !opts.force && cachedUsageResult && now - lastUsageScanAt < 5000) {
+    return cachedUsageResult;
   }
 
-  const res = {
-    totalIn,
-    totalOut,
-    totalCache,
-    totalActive: totalIn + totalOut,
-    totalTurns,
-    models
-  };
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  const todayStartMs = opts.sinceMs !== undefined ? opts.sinceMs : startOfDay.getTime();
+  const weekStartMs = opts.weekSinceMs !== undefined ? opts.weekSinceMs : (now - 7 * 86400000);
+  const dayKey = `${startOfDay.getFullYear()}-${startOfDay.getMonth()}-${startOfDay.getDate()}`;
+  const dirs = customDirs || BRAIN_DIRS;
+  const todayTotals = new Map();
+  const weekTotals = new Map();
+
+  for (const brainDir of dirs) {
+    if (!fs.existsSync(brainDir)) continue;
+    let convDirs = [];
+    try { convDirs = fs.readdirSync(brainDir, { withFileTypes: true }); } catch { continue; }
+
+    for (const d of convDirs) {
+      if (!d.isDirectory()) continue;
+      const tPath = path.join(brainDir, d.name, '.system_generated', 'logs', 'transcript.jsonl');
+      let mtimeMs = 0;
+      try { mtimeMs = fs.statSync(tPath).mtimeMs; } catch { continue; }
+      if (mtimeMs < weekStartMs) continue;
+
+      let fileSummary = !customDirs ? usageFileCache.get(tPath) : null;
+      if (!fileSummary || fileSummary.mtimeMs !== mtimeMs || fileSummary.dayKey !== dayKey) {
+        const todayPerModel = {};
+        const weekPerModel = {};
+        try {
+          const lines = fs.readFileSync(tPath, 'utf8').split('\n');
+          for (const line of lines) {
+            if (!line.includes('"model"')) continue;
+            let entry;
+            try { entry = JSON.parse(line); } catch { continue; }
+            if (!entry || !entry.model) continue;
+            const ts = entry.created_at ? Date.parse(entry.created_at) : mtimeMs;
+            if (!Number.isNaN(ts) && ts < weekStartMs) continue;
+
+            const m = entry.model;
+            const add = (target) => {
+              if (!target[m]) target[m] = { turns: 0, in: 0, out: 0, cache: 0 };
+              target[m].turns += 1;
+              target[m].in += Number(entry.input_tokens || 0);
+              target[m].out += Number(entry.output_tokens || 0);
+              target[m].cache += Number(entry.cache_read_tokens || 0);
+            };
+            add(weekPerModel);
+            if (Number.isNaN(ts) || ts >= todayStartMs) add(todayPerModel);
+          }
+        } catch { continue; }
+        fileSummary = { mtimeMs, dayKey, todayPerModel, weekPerModel };
+        if (!customDirs) usageFileCache.set(tPath, fileSummary);
+      }
+
+      for (const [m, s] of Object.entries(fileSummary.todayPerModel)) addUsageBucket(todayTotals, m, s);
+      for (const [m, s] of Object.entries(fileSummary.weekPerModel)) addUsageBucket(weekTotals, m, s);
+    }
+  }
+
+  const todaySummary = buildUsageSummary(todayTotals);
+  const weekSummary = buildUsageSummary(weekTotals);
+  const res = { ...todaySummary, week: weekSummary };
   if (!customDirs) {
     cachedUsageResult = res;
     lastUsageScanAt = now;
