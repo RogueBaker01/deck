@@ -325,7 +325,7 @@ function handleMouse(str) {
 
 function handleKeyInput(buf) {
   const str = buf.toString('utf8');
-  if (str.startsWith('\x1b[<') && handleMouse(str)) return;
+  if (str.includes('\x1b[<') && handleMouse(str)) return;
 
   // Ctrl+Q exit
   if (str === '\x11') {
@@ -461,10 +461,12 @@ async function main() {
     notifyWindows('/deck · Sesión anterior encontrada', `¿Quieres restaurar ${pendingRestore.panes.length} paneles (${names})? Presiona [S] en /deck.`);
   }
   setInterval(saveSessionState, 15000).unref();
-  process.stdout.write('\x1b[?1049h\x1b[?1000h\x1b[?1006h'); // alt screen + mouse SGR
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
   process.stdin.resume();
   process.stdin.on('data', handleKeyInput);
+  // Enable alt-screen and SGR mouse AFTER setRawMode(true) so libuv doesn't reset console flags on Windows
+  process.stdout.write('\x1b[?1049h\x1b[?1000h\x1b[?1006h');
+  setTimeout(() => process.stdout.write('\x1b[?1000h\x1b[?1006h'), 300);
   process.stdout.on('resize', scheduleRender);
   process.on('SIGINT', cleanupAndExit);
   process.on('SIGHUP', cleanupAndExit);
