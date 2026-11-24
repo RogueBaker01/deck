@@ -101,22 +101,52 @@ function readTermLine(term, rowIdx, maxCols) {
   const line = buf.getLine(buf.viewportY + rowIdx);
   if (!line) return ' '.repeat(maxCols);
   let out = '';
+  let lastSgr = '';
+  let colUsed = 0;
+
   for (let i = 0; i < maxCols; i++) {
     const cell = line.getCell(i);
-    if (!cell) { out += ' '; continue; }
-    const ch = cell.getChars() || ' ';
-    const fgMode = cell.getFgColorMode();
-    const fgCol = cell.getFgColor();
-    if (fgMode === 0x01000000 && fgCol >= 0) {
-      // 256 palette or basic ANSI
-      out += `\x1b[38;5;${fgCol}m${ch}\x1b[39m`;
-    } else if (fgMode === 0x02000000) {
-      const r = (fgCol >> 16) & 255, g = (fgCol >> 8) & 255, b = fgCol & 255;
-      out += `\x1b[38;2;${r};${g};${b}m${ch}\x1b[39m`;
-    } else {
-      out += ch;
+    if (!cell) {
+      if (lastSgr !== '') { out += '\x1b[0m'; lastSgr = ''; }
+      out += ' ';
+      colUsed++;
+      continue;
     }
+    const width = cell.getWidth();
+    if (width === 0) continue; // trailing half of wide char
+    const ch = cell.getChars() || ' ';
+
+    const parts = [];
+    if (cell.isBold()) parts.push('1');
+    if (cell.isDim()) parts.push('2');
+    if (cell.isItalic()) parts.push('3');
+    if (cell.isUnderline()) parts.push('4');
+    if (cell.isInverse()) parts.push('7');
+
+    if (cell.isFgRGB()) {
+      const c = cell.getFgColor();
+      parts.push(`38;2;${(c >> 16) & 255};${(c >> 8) & 255};${c & 255}`);
+    } else if (cell.isFgPalette()) {
+      parts.push(`38;5;${cell.getFgColor()}`);
+    }
+
+    if (cell.isBgRGB()) {
+      const c = cell.getBgColor();
+      parts.push(`48;2;${(c >> 16) & 255};${(c >> 8) & 255};${c & 255}`);
+    } else if (cell.isBgPalette()) {
+      parts.push(`48;5;${cell.getBgColor()}`);
+    }
+
+    const sgr = parts.length ? `\x1b[${parts.join(';')}m` : '';
+    if (sgr !== lastSgr) {
+      out += '\x1b[0m' + sgr;
+      lastSgr = sgr;
+    }
+    out += ch;
+    colUsed += width;
   }
+  if (lastSgr !== '') out += '\x1b[0m';
+  if (colUsed < maxCols) out += ' '.repeat(maxCols - colUsed);
   return out;
 }
 
