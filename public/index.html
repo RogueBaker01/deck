@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>/deck — Antigravity Multiplexer</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css" />
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+  <style>
+    :root {
+      --bg: #0c0d10;
+      --sidebar-bg: #111318;
+      --card-bg: #171a21;
+      --card-hover: #1e222b;
+      --border: #262a34;
+      --text: #e4e4e7;
+      --muted: #8e929f;
+      --ring-blue: #3b82f6;
+      --ring-glow: rgba(59, 130, 246, 0.38);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      user-select: none;
+    }
+    /* Topbar style cmux */
+    .topbar {
+      height: 38px;
+      background: var(--sidebar-bg);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 12px;
+      font-size: 12px;
+    }
+    .topbar-left, .topbar-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .brand {
+      font-weight: 700;
+      letter-spacing: 0.4px;
+      color: #fff;
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .badge-alert-count {
+      background: var(--ring-blue);
+      color: #fff;
+      font-weight: 700;
+      font-size: 11px;
+      padding: 1px 6px;
+      border-radius: 10px;
+      display: none;
+    }
+    .badge-alert-count.visible { display: inline-block; }
+    .btn {
+      background: #1d2028;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 4px 9px;
+      font-size: 11.5px;
+      cursor: pointer;
+      transition: background 0.12s, border-color 0.12s;
+    }
+    .btn:hover { background: #272b36; border-color: #3a4050; }
+    .btn-primary {
+      background: #1e3a8a;
+      border-color: var(--ring-blue);
+      color: #fff;
+    }
+    .btn-primary:hover { background: #2563eb; }
+
+    /* Main layout */
+    .workspace {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+    /* Left Sidebar cmux cards */
+    .sidebar {
+      width: 265px;
+      background: var(--sidebar-bg);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+      padding: 8px;
+      gap: 7px;
+    }
+    .card {
+      position: relative;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-left: 4px solid #52525b;
+      border-radius: 6px;
+      padding: 8px 10px;
+      cursor: pointer;
+      transition: all 0.14s ease;
+    }
+    .card:hover { background: var(--card-hover); }
+    .card.active {
+      background: #1b2234;
+      border-color: #3b4866;
+    }
+    .card.attention {
+      border-color: var(--ring-blue);
+      box-shadow: 0 0 0 1px var(--ring-blue), 0 0 12px var(--ring-glow);
+    }
+    .card-row-1 {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      margin-bottom: 4px;
+    }
+    .card-title-wrap {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      flex: 1;
+    }
+    .pane-num {
+      width: 17px;
+      height: 17px;
+      border-radius: 50%;
+      background: #272b36;
+      color: #cbd5e1;
+      font-size: 10px;
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .card.attention .pane-num {
+      background: var(--ring-blue);
+      color: #fff;
+    }
+    .card-role {
+      font-size: 12.5px;
+      font-weight: 600;
+      color: #fff;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .group-pill {
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: #fff;
+      cursor: pointer;
+      flex-shrink: 0;
+      border: none;
+    }
+    .card-preview {
+      font-size: 11px;
+      color: #9ca3af;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 5px;
+      font-family: "Cascadia Code", Consolas, monospace;
+    }
+    .card.attention .card-preview {
+      color: #93c5fd;
+    }
+    .subagents-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-bottom: 5px;
+    }
+    .sub-chip {
+      font-size: 9.5px;
+      background: #232733;
+      color: #a5b4fc;
+      border: 1px solid #31374a;
+      border-radius: 3px;
+      padding: 1px 5px;
+    }
+    .card-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 10.5px;
+      color: var(--muted);
+    }
+    .status-dot {
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      margin-right: 4px;
+    }
+    .status-Running { background: #10b981; }
+    .status-Waiting { background: var(--ring-blue); box-shadow: 0 0 6px var(--ring-blue); }
+    .status-Stopped { background: #ef4444; }
+
+    /* Split grid area */
+    .grid-area {
+      flex: 1;
+      display: grid;
+      gap: 6px;
+      padding: 6px;
+      background: #08090c;
+      overflow: hidden;
+    }
+    .grid-1 { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+    .grid-2 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr; }
+    .grid-3 { grid-template-columns: 1.15fr 1fr; grid-template-rows: 1fr 1fr; }
+    .grid-3 .pane-box:first-child { grid-row: 1 / span 2; }
+    .grid-4 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+    .grid-many { grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); grid-auto-rows: 1fr; }
+
+    .pane-box {
+      display: flex;
+      flex-direction: column;
+      background: #0f1116;
+      border: 1.5px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+      position: relative;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    .pane-box.focused {
+      border-color: #525b70;
+    }
+    /* The signature cmux BLUE RING when waiting/attention */
+    .pane-box.attention {
+      border-color: var(--ring-blue);
+      box-shadow: 0 0 0 1.5px var(--ring-blue), inset 0 0 12px rgba(59, 130, 246, 0.16), 0 0 18px var(--ring-glow);
+    }
+    .pane-header {
+      height: 29px;
+      background: #14171f;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 8px;
+      font-size: 11.5px;
+    }
+    .pane-header-left {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+    }
+    .pane-title {
+      font-weight: 600;
+      color: #f3f4f6;
+      cursor: pointer;
+      padding: 1px 4px;
+      border-radius: 3px;
+    }
+    .pane-title:hover { background: #262b38; }
+    .pane-cwd {
+      color: var(--muted);
+      font-size: 10.5px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 240px;
+    }
+    .pane-header-right {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .icon-btn {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid transparent;
+      border-radius: 4px;
+      padding: 2px 6px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .icon-btn:hover { color: #fff; background: #252a36; border-color: #383f52; }
+    .term-container {
+      flex: 1;
+      padding: 4px;
+      overflow: hidden;
+    }
+    /* Group bar message sender at bottom of pane when in Group A/B/C/D */
+    .group-bar {
+      height: 28px;
+      background: #13161e;
+      border-top: 1px solid var(--border);
+      display: none;
+      align-items: center;
+      padding: 0 6px;
+      gap: 6px;
+      font-size: 11px;
+    }
+    .group-bar.visible { display: flex; }
+    .group-bar input {
+      flex: 1;
+      background: #0c0e13;
+      border: 1px solid #2b303c;
+      color: #fff;
+      border-radius: 4px;
+      padding: 2px 7px;
+      font-size: 11px;
+      outline: none;
+    }
+    .group-bar select {
+      background: #181c26;
+      color: #e4e4e7;
+      border: 1px solid #2b303c;
+      border-radius: 4px;
+      padding: 2px 5px;
+      font-size: 11px;
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <div class="brand">
+        <span>/deck</span>
+        <span id="alertBadge" class="badge-alert-count">0 esperando</span>
+      </div>
+      <button class="btn btn-primary" onclick="spawnPane({ autoAgy: false })">+ Terminal</button>
+      <button class="btn" onclick="spawnPane({ autoAgy: true, remoteControl: false })">+ agy</button>
+      <button class="btn" onclick="spawnPane({ autoAgy: true, remoteControl: true })">+ agy --remote-control</button>
+    </div>
+    <div class="topbar-right">
+      <span style="color:var(--muted);font-size:11px;">Doble clic en el nombre para cambiar rol · Clic en el grupo para vincular/aislar</span>
+      <button class="btn" onclick="clearAllAttention()">Limpiar alertas azules</button>
+    </div>
+  </header>
+
+  <div class="workspace">
+    <aside id="sidebar" class="sidebar"></aside>
+    <main id="gridArea" class="grid-area grid-1"></main>
+  </div>
+
+  <script>
+    const GROUP_ORDER = ['isolated', 'A', 'B', 'C', 'D'];
+    let state = { groups: {}, panes: [], agySessions: [] };
+    let focusedPaneId = null;
+    const terms = new Map(); // id -> { term, fit, container, box }
+
+    const ws = new WebSocket(`ws://${location.host}`);
+    ws.onmessage = (ev) => {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === 'state') {
+        state = msg;
+        if (!focusedPaneId && state.panes.length) focusedPaneId = state.panes[0].id;
+        renderUI();
+      } else if (msg.type === 'output') {
+        const entry = terms.get(msg.id);
+        if (entry) entry.term.write(msg.data);
+      }
+    };
+
+    function cycleGroup(paneId, currentGroup, ev) {
+      if (ev) ev.stopPropagation();
+      const idx = GROUP_ORDER.indexOf(currentGroup);
+      const nextGroup = GROUP_ORDER[(idx + 1) % GROUP_ORDER.length];
+      fetch(`/api/panes/${encodeURIComponent(paneId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group: nextGroup })
+      });
+    }
+
+    function renameRole(paneId, currentRole, ev) {
+      if (ev) ev.stopPropagation();
+      const next = prompt('Rol / Etiqueta para esta terminal:', currentRole);
+      if (next && next.trim()) {
+        fetch(`/api/panes/${encodeURIComponent(paneId)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ role: next.trim() })
+        });
+      }
+    }
+
+    function spawnPane(opts = {}) {
+      const role = opts.role || prompt('Etiqueta / Rol de la nueva terminal (ej: api, reset-usb, browser):', `Agente ${state.panes.length + 1}`);
+      if (role === null) return;
+      const cwd = opts.cwd || prompt('Directorio (deja vacío para usar el actual):', '');
+      fetch('/api/panes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...opts, role: role.trim() || undefined, cwd: cwd ? cwd.trim() : undefined })
+      });
+    }
+
+    function closePane(paneId, ev) {
+      if (ev) ev.stopPropagation();
+      fetch(`/api/panes/${encodeURIComponent(paneId)}`, { method: 'DELETE' });
+    }
+
+    function focusPane(paneId) {
+      focusedPaneId = paneId;
+      ws.send(JSON.stringify({ type: 'focus', id: paneId }));
+      const entry = terms.get(paneId);
+      if (entry) entry.term.focus();
+      renderUI();
+    }
+
+    function clearAllAttention() {
+      for (const p of state.panes) {
+        if (p.attention) {
+          fetch(`/api/panes/${encodeURIComponent(p.id)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ attention: false })
+          });
+        }
+      }
+    }
+
+    function sendPeerMsg(fromId, inputEl, selectEl) {
+      const toTarget = selectEl.value;
+      const text = inputEl.value.trim();
+      if (!toTarget || !text) return;
+      fetch('/api/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fromId, toTarget, text })
+      }).then(r => r.json()).then(res => {
+        if (!res.ok) alert(res.error);
+        else inputEl.value = '';
+      });
+    }
+
+    function updateGridClass(count) {
+      const grid = document.getElementById('gridArea');
+      grid.className = 'grid-area ' + (
+        count <= 1 ? 'grid-1' :
+        count === 2 ? 'grid-2' :
+        count === 3 ? 'grid-3' :
+        count === 4 ? 'grid-4' : 'grid-many'
+      );
+      setTimeout(() => {
+        for (const [id, entry] of terms.entries()) {
+          try {
+            entry.fit.fit();
+            ws.send(JSON.stringify({ type: 'resize', id, cols: entry.term.cols, rows: entry.term.rows }));
+          } catch {}
+        }
+      }, 60);
+    }
+
+    function renderUI() {
+      // Top alert counter
+      const waitingCount = state.panes.filter(p => p.attention).length;
+      const badge = document.getElementById('alertBadge');
+      badge.textContent = `${waitingCount} esperando`;
+      badge.className = 'badge-alert-count' + (waitingCount > 0 ? ' visible' : '');
+
+      // Sidebar cards
+      const sidebar = document.getElementById('sidebar');
+      sidebar.innerHTML = '';
+      const globalSubs = (state.agySessions && state.agySessions[0] && state.agySessions[0].subagents) || [];
+
+      for (const p of state.panes) {
+        const gMeta = p.groupMeta || { label: 'Aislado', color: '#52525b' };
+        const card = document.createElement('div');
+        card.className = `card${p.id === focusedPaneId ? ' active' : ''}${p.attention ? ' attention' : ''}`;
+        card.style.borderLeftColor = gMeta.color;
+        card.onclick = () => focusPane(p.id);
+
+        const subs = p.subagents && p.subagents.length ? p.subagents : [];
+        const subsHtml = subs.length
+          ? `<div class="subagents-list">${subs.map(s => `<span class="sub-chip">↳ ${s}</span>`).join('')}</div>`
+          : '';
+
+        const shortCwd = p.cwd.replace(/^C:\\Users\\[^\\]+/i, '~').replace(/\\/g, '/');
+        const gitAndPath = `${p.branch ? p.branch + ' · ' : ''}${shortCwd}`;
+
+        card.innerHTML = `
+          <div class="card-row-1">
+            <div class="card-title-wrap">
+              <span class="pane-num">${p.num}</span>
+              <span class="card-role" title="Doble clic para renombrar">${p.role}</span>
+            </div>
+            <button class="group-pill" style="background:${gMeta.color}" title="Clic para cambiar Aislado / Grupo A..D">${gMeta.label}</button>
+          </div>
+          <div class="card-preview">${p.lastLine || 'Listo'}</div>
+          ${subsHtml}
+          <div class="card-meta">
+            <span><span class="status-dot status-${p.status}"></span>${p.status}${p.remoteControl ? ' · RC' : ''}</span>
+            <span title="${p.cwd}">${gitAndPath.slice(0, 26)}</span>
+          </div>
+        `;
+        card.querySelector('.card-role').ondblclick = (ev) => renameRole(p.id, p.role, ev);
+        card.querySelector('.group-pill').onclick = (ev) => cycleGroup(p.id, p.group, ev);
+        sidebar.appendChild(card);
+      }
+
+      // Sync terminal panes in grid
+      const grid = document.getElementById('gridArea');
+      const currentIds = new Set(state.panes.map(p => p.id));
+      for (const [id, entry] of terms.entries()) {
+        if (!currentIds.has(id)) {
+          entry.term.dispose();
+          entry.box.remove();
+          terms.delete(id);
+        }
+      }
+
+      for (const p of state.panes) {
+        const gMeta = p.groupMeta || { label: 'Aislado', color: '#52525b' };
+        let entry = terms.get(p.id);
+        if (!entry) {
+          const box = document.createElement('section');
+          box.className = 'pane-box';
+          box.onmousedown = () => {
+            if (focusedPaneId !== p.id) focusPane(p.id);
+          };
+
+          box.innerHTML = `
+            <div class="pane-header">
+              <div class="pane-header-left">
+                <span class="pane-num">${p.num}</span>
+                <span class="pane-title" title="Clic para cambiar rol">${p.role}</span>
+                <button class="group-pill hdr-group" style="background:${gMeta.color}">${gMeta.label}</button>
+                <span class="pane-cwd"></span>
+              </div>
+              <div class="pane-header-right">
+                <button class="icon-btn btn-split" title="Abrir otro panel en la misma carpeta">[+]</button>
+                <button class="icon-btn btn-close" title="Cerrar terminal">[x]</button>
+              </div>
+            </div>
+            <div class="term-container"></div>
+            <div class="group-bar">
+              <span style="color:#9ca3af;">Enviar a:</span>
+              <select class="peer-select"></select>
+              <input class="peer-input" type="text" placeholder="Mensaje al compañero de grupo (Enter)..." />
+            </div>
+          `;
+          grid.appendChild(box);
+
+          const container = box.querySelector('.term-container');
+          const term = new Terminal({
+            cursorBlink: true,
+            fontSize: 13,
+            fontFamily: '"Cascadia Code", Consolas, "Courier New", monospace',
+            theme: {
+              background: '#0f1116',
+              foreground: '#e4e4e7',
+              cursor: '#3b82f6',
+              selectionBackground: 'rgba(59, 130, 246, 0.3)'
+            }
+          });
+          const fit = new FitAddon.FitAddon();
+          term.loadAddon(fit);
+          term.open(container);
+          setTimeout(() => {
+            try {
+              fit.fit();
+              ws.send(JSON.stringify({ type: 'resize', id: p.id, cols: term.cols, rows: term.rows }));
+            } catch {}
+          }, 50);
+
+          term.onData((data) => {
+            ws.send(JSON.stringify({ type: 'input', id: p.id, data }));
+          });
+
+          const peerInput = box.querySelector('.peer-input');
+          const peerSelect = box.querySelector('.peer-select');
+          peerInput.onkeydown = (ev) => {
+            if (ev.key === 'Enter') sendPeerMsg(p.id, peerInput, peerSelect);
+          };
+
+          entry = { term, fit, container, box };
+          terms.set(p.id, entry);
+        }
+
+        // Update dynamic header & classes
+        const { box } = entry;
+        box.className = `pane-box${p.id === focusedPaneId ? ' focused' : ''}${p.attention ? ' attention' : ''}`;
+        box.querySelector('.pane-title').textContent = p.role;
+        box.querySelector('.pane-title').onclick = (ev) => renameRole(p.id, p.role, ev);
+
+        const hdrGroup = box.querySelector('.hdr-group');
+        hdrGroup.textContent = gMeta.label;
+        hdrGroup.style.background = gMeta.color;
+        hdrGroup.onclick = (ev) => cycleGroup(p.id, p.group, ev);
+
+        box.querySelector('.pane-cwd').textContent = `${p.branch ? '(' + p.branch + ') ' : ''}${p.cwd}`;
+        box.querySelector('.btn-split').onclick = (ev) => {
+          ev.stopPropagation();
+          spawnPane({ cwd: p.cwd, group: p.group });
+        };
+        box.querySelector('.btn-close').onclick = (ev) => closePane(p.id, ev);
+
+        // Update peer communication bar (only visible if not isolated and peers exist in same group)
+        const peers = p.group === 'isolated' ? [] : state.panes.filter(other => other.id !== p.id && other.group === p.group);
+        const gBar = box.querySelector('.group-bar');
+        const sel = box.querySelector('.peer-select');
+        if (peers.length > 0) {
+          gBar.className = 'group-bar visible';
+          const prevVal = sel.value;
+          sel.innerHTML = peers.map(peer => `<option value="${peer.role}">${peer.role}</option>`).join('');
+          if (peers.some(peer => peer.role === prevVal)) sel.value = prevVal;
+        } else {
+          gBar.className = 'group-bar';
+        }
+      }
+
+      updateGridClass(state.panes.length);
+    }
+
+    window.addEventListener('resize', () => updateGridClass(state.panes.length));
+  </script>
+</body>
+</html>

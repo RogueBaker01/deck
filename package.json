@@ -1,0 +1,18 @@
+{
+  "name": "agy-deck",
+  "version": "0.1.0",
+  "description": "Lightweight cmux-inspired terminal multiplexer for Google Antigravity (agy) on Windows",
+  "main": "server.js",
+  "bin": {
+    "deck": "./bin/deck.js"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test.js"
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0",
+    "ws": "^8.18.0"
+  },
+  "license": "MIT"
+}
