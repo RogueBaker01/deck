@@ -281,7 +281,8 @@ function render() {
         const barStr = fg(qCol, '█'.repeat(filled)) + fg(RGB.border, '░'.repeat(barW - filled));
         const eta = formatResetEta(pool.resetTime);
         const isWeekly = pool.resetTime && (Date.parse(pool.resetTime) - Date.now()) > 24 * 3600000;
-        const scopeLabel = isWeekly ? `${pool.label} (Sem)` : pool.label;
+        const shortPool = pool.label.replace('Gemini 4 / Flash', 'Gemini').replace('Claude / GPT', 'Claude/GPT');
+        const scopeLabel = isWeekly ? `Sem · ${shortPool}` : `5h · ${shortPool}`;
         const nameW = Math.max(4, sidebarW - 4 - rightTxt.length - 1);
         const nameStr = trunc(scopeLabel, nameW);
         const padMid = ' '.repeat(Math.max(1, (sidebarW - 4) - nameStr.length - rightTxt.length));
