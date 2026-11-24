@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 const { Terminal } = require('@xterm/headless');
-const { startServer, createPane, sendGroupMessage, panes, GROUPS, events, saveSessionState, loadPreviousSession, restorePreviousSession, notifyWindows } = require('./server');
+const { startServer, createPane, sendGroupMessage, panes, GROUPS, events, commLog, saveSessionState, loadPreviousSession, restorePreviousSession, notifyWindows } = require('./server');
 
 const GROUP_ORDER = ['isolated', 'A', 'B', 'C', 'D'];
 const RGB = {
@@ -181,7 +181,7 @@ function render() {
   // 1. Topbar (Row 1)
   const alertTxt = (waitingCount > 0 ? bg(RGB.blue, bold(` ${waitingCount} esperando `)) + ' ' : '') +
                    (doneCount > 0 ? bg(RGB.green, bold(` ${doneCount} listo `)) + ' ' : '');
-  const topLeft = ` ${bold('/deck')} ${alertTxt}${fg(RGB.muted, '[F1]+Term [F3]+agy [F4]+agy-RC [F5]Grupo [F6]Rol [F7]Msg [F8]Cerrar [Ctrl+Q]Salir')}`;
+  const topLeft = ` ${bold('/deck')} ${alertTxt}${fg(RGB.muted, '[F1]+Term [F3]+agy [F4]+agy-RC [F5]Grupo [F6]Rol [F7]Cerrar [Ctrl+Q]Salir')}`;
   out += moveTo(1, 1) + bg(RGB.bgTop, trunc(topLeft, cols + 40));
 
   // 2. Sidebar (Cols 1..sidebarW, Rows 2..rows-1)
@@ -206,12 +206,32 @@ function render() {
     out += moveTo(sRow, 1) + bar + bg(cardBg, trunc(titleStr, padTitle) + pill) + fg(RGB.border, '│');
     const subTxt = p.subagents && p.subagents.length ? `↳ ${p.subagents.join(', ')}` : (p.lastLine || 'Listo');
     out += moveTo(sRow + 1, 1) + bar + bg(cardBg, fg(highlightColor || RGB.muted, trunc(subTxt, innerW))) + fg(RGB.border, '│');
-    const metaTxt = `${p.status}${p.remoteControl ? '·RC' : ''} ${p.branch ? '· ' + p.branch : ''}`;
+    const qTxt = p.queue && p.queue.length ? ` · ${p.queue.length} cola` : '';
+    const metaTxt = `${p.status}${p.remoteControl ? '·RC' : ''}${qTxt} ${p.branch ? '· ' + p.branch : ''}`;
     out += moveTo(sRow + 2, 1) + bar + bg(cardBg, fg(RGB.muted, trunc(metaTxt, innerW))) + fg(RGB.border, '│');
     out += moveTo(sRow + 3, 1) + fg(highlightColor || RGB.border, '─'.repeat(sidebarW - 1) + '┤');
 
     lastSidebarCards.push({ id: p.id, rStart: sRow, rEnd: sRow + 3, pillRow: sRow, pillColStart, pillColEnd });
     sRow += 4;
+  }
+  if (sRow + 2 < rows) {
+    const innerW = sidebarW - 2;
+    out += moveTo(sRow, 1) + fg(RGB.muted, trunc(' Comunicación entre IAs', sidebarW - 1)) + fg(RGB.border, '│');
+    sRow++;
+    const recent = commLog.slice(-Math.max(1, Math.floor((rows - sRow) / 2))).reverse();
+    if (!recent.length) {
+      out += moveTo(sRow, 1) + fg(RGB.muted, trunc(' Sin mensajes aún', sidebarW - 1)) + fg(RGB.border, '│');
+      sRow++;
+    } else {
+      for (const m of recent) {
+        if (sRow + 1 >= rows) break;
+        const gCol = RGB[m.group] || RGB.muted;
+        const hdr = `${m.from} → ${m.to}${m.queued ? ' [cola]' : ''}`;
+        out += moveTo(sRow, 1) + fg(gCol, '•') + fg(RGB.focus, trunc(' ' + hdr, innerW)) + fg(RGB.border, '│');
+        out += moveTo(sRow + 1, 1) + ' ' + fg(RGB.muted, trunc(m.text, innerW)) + fg(RGB.border, '│');
+        sRow += 2;
+      }
+    }
   }
   while (sRow < rows) {
     out += moveTo(sRow, 1) + ' '.repeat(sidebarW - 1) + fg(RGB.border, '│');
@@ -368,10 +388,14 @@ function handleKeyInput(buf) {
     }
     if (/^[n\x1b]$/i.test(str)) {
       pendingRestore = null;
+      if (panes.size === 0) {
+        createPane({ role: 'Agente Principal', cwd: process.cwd(), group: 'isolated' });
+      }
       statusBanner = ' Sesión iniciada desde cero.';
       scheduleRender();
       return;
     }
+    return;
   }
 
   // Prompt input mode (F6 rename or F7 send)
@@ -435,21 +459,18 @@ function handleKeyInput(buf) {
     if (focusedId) { promptMode = { kind: 'role', buffer: '', targetId: focusedId }; scheduleRender(); }
     return;
   }
-  if (str === '\x1b[18~') { // F7: send group message
-    if (focusedId) { promptMode = { kind: 'send', buffer: '', targetId: focusedId }; scheduleRender(); }
-    return;
-  }
-  if (str === '\x1b[19~') { // F8: close pane
+  if (str === '\x1b[18~') { // F7: close pane
     const p = panes.get(focusedId);
-    if (p) { p.kill(); panes.delete(p.id); events.emit('state'); }
+    if (p) { clearTimeout(p.idleTimer); p.kill(); panes.delete(p.id); saveSessionState(); events.emit('state'); }
     return;
   }
-  if (str === '\x1b\t') { // Alt+Tab: switch focus
+  if (str === '\t' || str === '\x1b\t' || str === '\x1b[Z') { // Tab / Alt+Tab / Shift+Tab: switch focus
     const keys = Array.from(panes.keys());
     if (keys.length > 1) {
-      focusedId = keys[(keys.indexOf(focusedId) + 1) % keys.length];
+      const step = str === '\x1b[Z' ? -1 : 1;
+      focusedId = keys[(keys.indexOf(focusedId) + step + keys.length) % keys.length];
       const p = panes.get(focusedId);
-      if (p) p.attention = false;
+      if (p) { p.attention = false; p.done = false; p.notified = false; }
       scheduleRender();
     }
     return;
@@ -479,7 +500,7 @@ function cleanupAndExit() {
 
 async function main() {
   pendingRestore = loadPreviousSession();
-  await startServer();
+  await startServer(undefined, { noDefaultPane: Boolean(pendingRestore) });
   if (pendingRestore) {
     const names = pendingRestore.panes.map(p => p.role).slice(0, 3).join(', ');
     notifyWindows('/deck · Sesión anterior encontrada', `¿Quieres restaurar ${pendingRestore.panes.length} paneles (${names})? Presiona [S] en /deck.`);

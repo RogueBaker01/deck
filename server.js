@@ -29,6 +29,7 @@ const GROUPS = {
 
 const panes = new Map();
 const clients = new Set();
+const commLog = [];
 let nextNum = 1;
 
 function slugify(str) {
@@ -224,9 +225,11 @@ function restorePreviousSession(saved) {
       remoteControl: Boolean(item.remoteControl),
       autoAgy: Boolean(item.wasAgy),
       continueAgy: shouldContinue,
-      conversationId: item.conversationId || null
+      conversationId: item.conversationId || null,
+      skipSave: true
     });
   }
+  saveSessionState();
   return saved.panes.length;
 }
 
@@ -251,11 +254,17 @@ function findPane(target) {
   return null;
 }
 
-function formatDeckMessage(receiver, fromName, text) {
+const DECK_CLI = path.join(__dirname, 'bin', 'deck.js');
+
+function formatDeckMessage(receiver, fromName, text, opts = {}) {
   const isAgy = Boolean(receiver.wasAgy || receiver.remoteControl || /Antigravity CLI/i.test(receiver.buffer));
   const grp = GROUPS[receiver.group]?.label || receiver.group;
   if (isAgy) {
-    return /^\/btw\b/i.test(text) ? text : `/btw [DECK from ${fromName} (${grp})]: ${text}`;
+    const canReply = !opts.reply && fromName && fromName !== 'deck';
+    const replyHint = canReply
+      ? ` [Al terminar, confirma o responde ejecutando: node "${DECK_CLI}" send "${fromName}" "<tu respuesta o confirmación>" --reply]`
+      : '';
+    return `[DECK de ${fromName} (${grp})]: ${text}${replyHint}`;
   }
   return `# [DECK MSG from ${fromName} (${grp})]: ${text}`;
 }
@@ -263,8 +272,10 @@ function formatDeckMessage(receiver, fromName, text) {
 function flushQueue(pane) {
   if (!pane.queue.length || !pane.proc) return;
   const next = pane.queue.shift();
-  const formatted = formatDeckMessage(pane, next.from, next.text);
+  const formatted = formatDeckMessage(pane, next.from, next.text, { reply: next.reply });
   pane.write(`\r\n${formatted}\r\n`);
+  const queuedEntry = commLog.find(e => e.to === pane.role && e.from === next.from && e.queued);
+  if (queuedEntry) queuedEntry.queued = false;
   broadcastState();
 }
 
@@ -314,12 +325,38 @@ function createPane(opts = {}) {
     kill: () => {}
   };
 
+  let startupCmd = null;
+  if (opts.cmd) {
+    startupCmd = opts.cmd;
+  } else if (opts.autoAgy) {
+    const convFlag = opts.conversationId
+      ? ` --conversation ${opts.conversationId}`
+      : (opts.continueAgy ? ' --continue' : '');
+    startupCmd = `agy${convFlag}${remoteControl ? ' --remote-control' : ''}`;
+  }
+
+  let startupSent = false;
+  let startupFallback = null;
+  const sendStartupCmd = () => {
+    if (startupSent || !startupCmd) return;
+    startupSent = true;
+    if (startupFallback) clearTimeout(startupFallback);
+    pane.write(`${startupCmd}\r`);
+    if (opts.prompt) {
+      setTimeout(() => pane.write(`${opts.prompt}\r`), 1200);
+    }
+  };
+
   const onOutput = (raw) => {
     pane.buffer = (pane.buffer + raw).slice(-40000);
     pane.outputBytes += raw.length;
     pane.status = 'Running';
     pane.done = false;
     const clean = stripAnsi(raw);
+    if (!pane.wasAgy && /Antigravity CLI/i.test(clean)) pane.wasAgy = true;
+    if (startupCmd && !startupSent && /PS [^\r\n]*>\s*$/.test(clean)) {
+      setTimeout(sendStartupCmd, 80);
+    }
     const det = detectAttention(clean);
     if (det && det.lastLine) {
       pane.lastLine = det.lastLine;
@@ -395,19 +432,11 @@ function createPane(opts = {}) {
   }
 
   panes.set(id, pane);
-  saveSessionState();
+  if (!opts.skipSave) saveSessionState();
 
-  if (opts.cmd) {
-    setTimeout(() => pane.write(`${opts.cmd}\r`), 350);
-  } else if (opts.autoAgy) {
-    const convFlag = opts.conversationId
-      ? ` --conversation ${opts.conversationId}`
-      : (opts.continueAgy ? ' --continue' : '');
-    const agyCmd = `agy${convFlag}${remoteControl ? ' --remote-control' : ''}`;
-    setTimeout(() => pane.write(`${agyCmd}\r`), 350);
-  }
-
-  if (opts.prompt) {
+  if (startupCmd) {
+    startupFallback = setTimeout(sendStartupCmd, 2000);
+  } else if (opts.prompt) {
     setTimeout(() => pane.write(`${opts.prompt}\r`), 1200);
   }
 
@@ -415,7 +444,7 @@ function createPane(opts = {}) {
   return pane;
 }
 
-function sendGroupMessage({ fromId, toTarget, text, force = false }) {
+function sendGroupMessage({ fromId, toTarget, text, force = false, reply = false }) {
   const sender = findPane(fromId);
   const receiver = findPane(toTarget);
   if (!receiver) return { ok: false, error: `No existe el panel o rol "${toTarget}"` };
@@ -437,16 +466,20 @@ function sendGroupMessage({ fromId, toTarget, text, force = false }) {
   }
 
   const fromName = sender ? sender.role : 'deck';
+  const isQueued = receiver.status === 'Running';
+  commLog.push({ from: fromName, to: receiver.role, group: receiver.group, text: text.slice(0, 80), queued: isQueued, at: Date.now() });
+  if (commLog.length > 12) commLog.shift();
+
   receiver.attention = true;
   receiver.lastLine = `Mensaje de ${fromName}: ${text.slice(0, 80)}`;
 
-  if (receiver.status === 'Running') {
-    receiver.queue.push({ from: fromName, text, at: Date.now() });
+  if (isQueued) {
+    receiver.queue.push({ from: fromName, text, reply: Boolean(reply), at: Date.now() });
     broadcastState();
     return { ok: true, queued: true, to: receiver.role, group: receiver.group };
   }
 
-  const formatted = formatDeckMessage(receiver, fromName, text);
+  const formatted = formatDeckMessage(receiver, fromName, text, { reply: Boolean(reply) });
   receiver.write(`${formatted}\r`);
   broadcastState();
   return { ok: true, queued: false, to: receiver.role, group: receiver.group, formatted };
@@ -500,6 +533,7 @@ const server = http.createServer(async (req, res) => {
     if (typeof body.remoteControl === 'boolean') pane.remoteControl = body.remoteControl;
     if (Array.isArray(body.subagents)) pane.subagents = body.subagents;
     pane.branch = getGitBranch(pane.cwd);
+    saveSessionState();
     broadcastState();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, pane: serializePane(pane) }));
@@ -512,6 +546,7 @@ const server = http.createServer(async (req, res) => {
       clearTimeout(pane.idleTimer);
       pane.kill();
       panes.delete(pane.id);
+      saveSessionState();
       broadcastState();
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -591,10 +626,10 @@ wss.on('connection', (ws) => {
   ws.on('close', () => clients.delete(ws));
 });
 
-function startServer(port = PORT) {
+function startServer(port = PORT, opts = {}) {
   return new Promise((resolve) => {
     server.listen(port, '127.0.0.1', () => {
-      if (panes.size === 0 && process.env.DECK_NO_DEFAULT_PANE !== '1') {
+      if (panes.size === 0 && !opts.noDefaultPane && process.env.DECK_NO_DEFAULT_PANE !== '1') {
         createPane({ role: 'Agente Principal', cwd: process.cwd(), group: 'isolated' });
       }
       resolve(server);
@@ -608,4 +643,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { startServer, createPane, sendGroupMessage, findPane, panes, GROUPS, events, saveSessionState, loadPreviousSession, restorePreviousSession, notifyWindows };
+module.exports = { startServer, createPane, sendGroupMessage, findPane, panes, GROUPS, events, commLog, saveSessionState, loadPreviousSession, restorePreviousSession, notifyWindows };

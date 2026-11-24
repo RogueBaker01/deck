@@ -80,7 +80,8 @@ async function main() {
     }
     for (const p of res.panes) {
       if (cmd === 'peers' && p.id === process.env.DECK_PANE_ID) continue;
-      console.log(`[${p.num}] ${p.role} (${p.groupMeta.label}) - ${p.status}${p.attention ? ' [ATENCION]' : ''} - ${p.cwd}`);
+      const selfTag = p.id === process.env.DECK_PANE_ID ? ' [TU]' : '';
+      console.log(`[${p.num}] ${p.role}${selfTag} (${p.groupMeta.label}) - ${p.status}${p.attention ? ' [ATENCION]' : ''} - ${p.cwd}`);
     }
     return;
   }
@@ -139,11 +140,12 @@ async function main() {
 
   if (cmd === 'send') {
     const toTarget = args[1];
-    const text = args.slice(2).join(' ');
+    const reply = args.includes('--reply');
+    const text = args.slice(2).filter(a => a !== '--force' && a !== '--reply').join(' ');
     const fromId = process.env.DECK_PANE_ID;
     const force = !fromId || args.includes('--force');
-    if (!toTarget || !text) { console.error('Uso: deck send <rol-destino> "<mensaje>"'); process.exit(1); }
-    const res = await apiRequest('POST', '/api/send', { fromId, toTarget, text, force });
+    if (!toTarget || !text) { console.error('Uso: deck send <rol-destino> "<mensaje>" [--reply]'); process.exit(1); }
+    const res = await apiRequest('POST', '/api/send', { fromId, toTarget, text, force, reply });
     if (!res.ok) {
       console.error(res.error);
       process.exit(1);
