@@ -90,13 +90,17 @@ function scanAntigravitySubagents() {
   return results;
 }
 
-function notifyWindows(title, message) {
+function notifyWindows(title, message, kind = 'done') {
   if (process.env.DECK_NO_NOTIFY === '1') return;
   const safeTitle = String(title || '/deck').replace(/'/g, "''").slice(0, 60);
   const safeMsg = String(message || 'Tarea finalizada').replace(/'/g, "''").slice(0, 140);
+  const beepCmd = kind === 'waiting'
+    ? '[console]::beep(660, 160); [console]::beep(990, 240)'
+    : '[console]::beep(880, 140); [console]::beep(1175, 240)';
   const ps = [
     'Add-Type -AssemblyName System.Windows.Forms, System.Drawing',
-    '[System.Media.SystemSounds]::Asterisk.Play()',
+    '[System.Media.SystemSounds]::Exclamation.Play()',
+    beepCmd,
     '$n = New-Object System.Windows.Forms.NotifyIcon',
     '$n.Icon = [System.Drawing.SystemIcons]::Information',
     '$n.Visible = $true',
@@ -144,16 +148,47 @@ function broadcast(msg) {
   }
 }
 
+function detectPaneConversationId(pane) {
+  if (pane.conversationId) return pane.conversationId;
+  const brainDir = path.join(AGY_DIR, 'brain');
+  if (!fs.existsSync(brainDir)) return null;
+  const used = new Set(Array.from(panes.values()).map(p => p.conversationId).filter(Boolean));
+  try {
+    const candidates = fs.readdirSync(brainDir, { withFileTypes: true })
+      .filter(d => d.isDirectory() && !used.has(d.name))
+      .map(d => {
+        const dirPath = path.join(brainDir, d.name);
+        const tPath = path.join(dirPath, '.system_generated', 'logs', 'transcript.jsonl');
+        let mtime = 0;
+        try { mtime = fs.statSync(tPath).mtimeMs; } catch {}
+        if (!mtime) { try { mtime = fs.statSync(dirPath).mtimeMs; } catch {} }
+        return { id: d.name, mtime };
+      })
+      .filter(c => c.mtime >= pane.createdAt - 2000)
+      .sort((a, b) => b.mtime - a.mtime);
+    if (candidates.length) {
+      pane.conversationId = candidates[0].id;
+      return pane.conversationId;
+    }
+  } catch {}
+  return null;
+}
+
 function saveSessionState() {
   if (process.env.DECK_NO_STATE === '1') return;
   try {
-    const snapshot = Array.from(panes.values()).map(p => ({
-      role: p.role,
-      cwd: p.cwd,
-      group: p.group,
-      remoteControl: Boolean(p.remoteControl),
-      wasAgy: Boolean(p.wasAgy || p.remoteControl || /Antigravity CLI/i.test(p.buffer))
-    }));
+    const snapshot = Array.from(panes.values()).map(p => {
+      const wasAgy = Boolean(p.wasAgy || p.remoteControl || /Antigravity CLI/i.test(p.buffer));
+      if (wasAgy && !p.conversationId) detectPaneConversationId(p);
+      return {
+        role: p.role,
+        cwd: p.cwd,
+        group: p.group,
+        remoteControl: Boolean(p.remoteControl),
+        wasAgy,
+        conversationId: p.conversationId || null
+      };
+    });
     if (snapshot.length > 0) {
       fs.writeFileSync(STATE_FILE, JSON.stringify({ savedAt: Date.now(), panes: snapshot }, null, 2));
     }
@@ -177,14 +212,19 @@ function restorePreviousSession(saved) {
     existing.kill();
     panes.delete(existing.id);
   }
+  let usedContinue = false;
   for (const item of saved.panes) {
+    const hasId = Boolean(item.conversationId);
+    const shouldContinue = Boolean(item.wasAgy && !hasId && !usedContinue);
+    if (shouldContinue) usedContinue = true;
     createPane({
       role: item.role,
       cwd: item.cwd,
       group: item.group || 'isolated',
       remoteControl: Boolean(item.remoteControl),
       autoAgy: Boolean(item.wasAgy),
-      continueAgy: Boolean(item.wasAgy)
+      continueAgy: shouldContinue,
+      conversationId: item.conversationId || null
     });
   }
   return saved.panes.length;
@@ -211,11 +251,20 @@ function findPane(target) {
   return null;
 }
 
+function formatDeckMessage(receiver, fromName, text) {
+  const isAgy = Boolean(receiver.wasAgy || receiver.remoteControl || /Antigravity CLI/i.test(receiver.buffer));
+  const grp = GROUPS[receiver.group]?.label || receiver.group;
+  if (isAgy) {
+    return /^\/btw\b/i.test(text) ? text : `/btw [DECK from ${fromName} (${grp})]: ${text}`;
+  }
+  return `# [DECK MSG from ${fromName} (${grp})]: ${text}`;
+}
+
 function flushQueue(pane) {
   if (!pane.queue.length || !pane.proc) return;
   const next = pane.queue.shift();
-  const formatted = `\r\n# [DECK MSG from ${next.from} (${GROUPS[pane.group]?.label || pane.group})]: ${next.text}\r\n`;
-  pane.write(formatted);
+  const formatted = formatDeckMessage(pane, next.from, next.text);
+  pane.write(`\r\n${formatted}\r\n`);
   broadcastState();
 }
 
@@ -252,6 +301,7 @@ function createPane(opts = {}) {
     notified: false,
     remoteControl,
     wasAgy: Boolean(opts.autoAgy || remoteControl),
+    conversationId: opts.conversationId || null,
     lastLine: 'Iniciando terminal...',
     subagents: Array.isArray(opts.subagents) ? opts.subagents : [],
     buffer: '',
@@ -279,7 +329,7 @@ function createPane(opts = {}) {
         if (!pane.notified) {
           pane.notified = true;
           events.emit('alert', { id: pane.id, kind: 'waiting' });
-          notifyWindows(`/deck · ${pane.role}`, `Esperando confirmación: ${pane.lastLine}`);
+          notifyWindows(`/deck · ${pane.role}`, `Esperando confirmación: ${pane.lastLine}`, 'waiting');
         }
       }
     }
@@ -297,7 +347,7 @@ function createPane(opts = {}) {
       if (pane.outputBytes > 250 && !pane.notified) {
         pane.notified = true;
         events.emit('alert', { id: pane.id, kind: 'done' });
-        notifyWindows(`/deck · ${pane.role} terminó`, pane.lastLine || 'CLI listo para revisar');
+        notifyWindows(`/deck · ${pane.role} terminó`, pane.lastLine || 'CLI listo para revisar', 'done');
       }
       flushQueue(pane);
       broadcastState();
@@ -350,7 +400,10 @@ function createPane(opts = {}) {
   if (opts.cmd) {
     setTimeout(() => pane.write(`${opts.cmd}\r`), 350);
   } else if (opts.autoAgy) {
-    const agyCmd = `agy${opts.continueAgy ? ' --continue' : ''}${remoteControl ? ' --remote-control' : ''}`;
+    const convFlag = opts.conversationId
+      ? ` --conversation ${opts.conversationId}`
+      : (opts.continueAgy ? ' --continue' : '');
+    const agyCmd = `agy${convFlag}${remoteControl ? ' --remote-control' : ''}`;
     setTimeout(() => pane.write(`${agyCmd}\r`), 350);
   }
 
@@ -366,6 +419,9 @@ function sendGroupMessage({ fromId, toTarget, text, force = false }) {
   const sender = findPane(fromId);
   const receiver = findPane(toTarget);
   if (!receiver) return { ok: false, error: `No existe el panel o rol "${toTarget}"` };
+  if (sender && receiver.id === sender.id) {
+    return { ok: false, error: `Bloqueado: "${sender.role}" no puede enviarse un mensaje a sí mismo.` };
+  }
 
   if (!force) {
     if (!sender) return { ok: false, error: 'Remitente no identificado' };
@@ -390,9 +446,10 @@ function sendGroupMessage({ fromId, toTarget, text, force = false }) {
     return { ok: true, queued: true, to: receiver.role, group: receiver.group };
   }
 
-  receiver.write(`${text}\r`);
+  const formatted = formatDeckMessage(receiver, fromName, text);
+  receiver.write(`${formatted}\r`);
   broadcastState();
-  return { ok: true, queued: false, to: receiver.role, group: receiver.group };
+  return { ok: true, queued: false, to: receiver.role, group: receiver.group, formatted };
 }
 
 function readJson(req) {
