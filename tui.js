@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 const { Terminal } = require('@xterm/headless');
-const { startServer, createPane, sendGroupMessage, panes, GROUPS, events, commLog, saveSessionState, loadPreviousSession, restorePreviousSession, notifyWindows } = require('./server');
+const { startServer, createPane, sendGroupMessage, swapPanes, panes, GROUPS, events, commLog, saveSessionState, loadPreviousSession, restorePreviousSession, notifyWindows, scanModelUsage, formatCompactTokens } = require('./server');
 
 const GROUP_ORDER = ['isolated', 'A', 'B', 'C', 'D'];
 const RGB = {
@@ -11,6 +11,10 @@ const RGB = {
   D: '244;63;94',
   blue: '59;130;246',
   green: '16;185;129',
+  cyan: '56;189;248',
+  amber: '251;191;36',
+  violet: '192;132;252',
+  coral: '251;113;133',
   muted: '142;146;159',
   border: '52;56;68',
   focus: '203;213;225',
@@ -34,8 +38,48 @@ let promptMode = null; // { kind: 'role'|'send', buffer: '', targetId }
 let pendingRestore = null;
 let statusBanner = '';
 let renderTimer = null;
+let pulseTimer = null;
 let lastGridBoxes = []; // [{ id, r, c, w, h }]
 let lastSidebarCards = []; // [{ id, rStart, rEnd }]
+let customSidebarW = null;
+let splitRatioX = 0.5;
+let splitRatioY = 0.5;
+let lastLayout = { cols: 120, rows: 32, sidebarW: 28, gridX: 29, gridW: 91, bodyH: 30 };
+let dragState = null; // { kind: 'resize-sidebar'|'resize-grid-x'|'resize-grid-y'|'move-pane', ... }
+
+const MODEL_FAMILY_RGB = {
+  hydrogen: RGB.cyan,
+  carbon: RGB.green,
+  argon: RGB.amber,
+  neon: RGB.violet,
+  claude: RGB.coral,
+  flash: RGB.blue,
+  other: RGB.focus
+};
+
+function lerpRgb(c1, c2, t) {
+  const r = Math.round(c1[0] + (c2[0] - c1[0]) * t);
+  const g = Math.round(c1[1] + (c2[1] - c1[1]) * t);
+  const b = Math.round(c1[2] + (c2[2] - c1[2]) * t);
+  return `${r};${g};${b}`;
+}
+
+function syncPulseTimer() {
+  const active = Array.from(panes.values()).some(p => p.done);
+  if (active && !pulseTimer) {
+    pulseTimer = setInterval(() => {
+      if (renderTimer) {
+        clearTimeout(renderTimer);
+        renderTimer = null;
+      }
+      render();
+    }, 40);
+    pulseTimer.unref();
+  } else if (!active && pulseTimer) {
+    clearInterval(pulseTimer);
+    pulseTimer = null;
+  }
+}
 
 function ensureXterm(pane) {
   if (xterms.has(pane.id)) return xterms.get(pane.id);
@@ -76,24 +120,24 @@ function computeGridLayout(paneList, x0, y0, totalW, totalH) {
   if (n === 0) return [];
   if (n === 1) return [{ pane: visible[0], r: y0, c: x0, w: totalW, h: totalH }];
   if (n === 2) {
-    const w1 = Math.floor(totalW / 2);
+    const w1 = Math.max(12, Math.min(totalW - 12, Math.floor(totalW * splitRatioX)));
     return [
       { pane: visible[0], r: y0, c: x0, w: w1, h: totalH },
       { pane: visible[1], r: y0, c: x0 + w1, w: totalW - w1, h: totalH }
     ];
   }
   if (n === 3) {
-    const w1 = Math.floor(totalW * 0.52);
+    const w1 = Math.max(12, Math.min(totalW - 12, Math.floor(totalW * splitRatioX)));
     const w2 = totalW - w1;
-    const h1 = Math.floor(totalH / 2);
+    const h1 = Math.max(5, Math.min(totalH - 5, Math.floor(totalH * splitRatioY)));
     return [
       { pane: visible[0], r: y0, c: x0, w: w1, h: totalH },
       { pane: visible[1], r: y0, c: x0 + w1, w: w2, h: h1 },
       { pane: visible[2], r: y0 + h1, c: x0 + w1, w: w2, h: totalH - h1 }
     ];
   }
-  const w1 = Math.floor(totalW / 2);
-  const h1 = Math.floor(totalH / 2);
+  const w1 = Math.max(12, Math.min(totalW - 12, Math.floor(totalW * splitRatioX)));
+  const h1 = Math.max(5, Math.min(totalH - 5, Math.floor(totalH * splitRatioY)));
   return [
     { pane: visible[0], r: y0, c: x0, w: w1, h: h1 },
     { pane: visible[1], r: y0, c: x0 + w1, w: totalW - w1, h: h1 },
@@ -161,18 +205,25 @@ function scheduleRender() {
   renderTimer = setTimeout(() => {
     renderTimer = null;
     render();
-  }, 32);
+  }, 16);
 }
 
 function render() {
   const cols = process.stdout.columns || 120;
   const rows = process.stdout.rows || 32;
-  const sidebarW = Math.min(30, Math.max(24, Math.floor(cols * 0.24)));
+  const defaultSidebarW = Math.min(30, Math.max(24, Math.floor(cols * 0.24)));
+  const sidebarW = Math.min(Math.max(16, cols - 24), Math.max(16, customSidebarW ?? defaultSidebarW));
   const gridX = sidebarW + 1;
   const gridW = Math.max(20, cols - sidebarW);
   const bodyH = Math.max(10, rows - 2);
+  lastLayout = { cols, rows, sidebarW, gridX, gridW, bodyH };
 
   const paneList = Array.from(panes.values());
+  syncPulseTimer();
+  const pulseT = (Math.sin(Date.now() / 240) + 1) / 2;
+  const donePulseRgb = lerpRgb([14, 54, 38], [74, 255, 178], pulseT);
+  const doneCardBg = lerpRgb([23, 26, 33], [18, 60, 42], pulseT);
+  const doneBorderBg = lerpRgb([17, 19, 24], [14, 48, 34], pulseT);
   const waitingCount = paneList.filter(p => p.attention).length;
   const doneCount = paneList.filter(p => p.done).length;
 
@@ -192,8 +243,8 @@ function render() {
     const gMeta = GROUPS[p.group] || GROUPS.isolated;
     const gColor = RGB[p.group] || RGB.isolated;
     const isFocus = p.id === focusedId;
-    const cardBg = isFocus ? RGB.bgActive : RGB.bgCard;
-    const highlightColor = p.done ? RGB.green : p.attention ? RGB.blue : null;
+    const cardBg = p.done ? doneCardBg : isFocus ? RGB.bgActive : RGB.bgCard;
+    const highlightColor = p.done ? donePulseRgb : p.attention ? RGB.blue : null;
     const bar = highlightColor ? fg(highlightColor, '┃') : fg(gColor, '┃');
     const titleStr = `[${p.num}] ${p.role}`;
     const pillText = ` ${gMeta.label} `;
@@ -213,6 +264,45 @@ function render() {
 
     lastSidebarCards.push({ id: p.id, rStart: sRow, rEnd: sRow + 3, pillRow: sRow, pillColStart, pillColEnd });
     sRow += 4;
+  }
+  if (sRow + 2 < rows) {
+    const usage = scanModelUsage();
+    const uHdr = ` Consumo Hoy · ${formatCompactTokens(usage.totalActive)} tok`;
+    out += moveTo(sRow, 1) + fg(RGB.focus, bold(trunc(uHdr, sidebarW - 1))) + fg(RGB.border, '│');
+    sRow++;
+    if (!usage.models.length) {
+      out += moveTo(sRow, 1) + fg(RGB.muted, trunc(' Sin actividad hoy', sidebarW - 1)) + fg(RGB.border, '│');
+      sRow++;
+    } else {
+      const reserveForComm = commLog.length > 0 && (rows - sRow) >= 8 ? 4 : 0;
+      const maxModels = Math.max(1, Math.floor((rows - sRow - reserveForComm) / 2));
+      for (const m of usage.models.slice(0, maxModels)) {
+        if (sRow + 1 >= rows) break;
+        const mCol = MODEL_FAMILY_RGB[m.family] || RGB.focus;
+        const rightTxt = `${formatCompactTokens(m.activeTokens)}·${m.turns}t`;
+        if (sidebarW - 4 > rightTxt.length + 4) {
+          const nameW = (sidebarW - 4) - rightTxt.length - 1;
+          const nameStr = trunc(m.label, nameW);
+          const padMid = ' '.repeat(Math.max(1, (sidebarW - 4) - nameStr.length - rightTxt.length));
+          out += moveTo(sRow, 1) + ' ' + fg(mCol, '•') + ' ' + fg(RGB.focus, nameStr) + padMid + fg(mCol, rightTxt) + fg(RGB.border, '│');
+        } else {
+          out += moveTo(sRow, 1) + ' ' + fg(mCol, '•') + fg(RGB.focus, trunc(` ${m.label} ${rightTxt}`, sidebarW - 3)) + fg(RGB.border, '│');
+        }
+        const barW = 5;
+        const filled = Math.max(1, Math.min(barW, Math.round(m.share * barW)));
+        const barStr = fg(mCol, '█'.repeat(filled)) + fg(RGB.border, '░'.repeat(barW - filled));
+        const detailRaw = sidebarW >= 34
+          ? ` in:${formatCompactTokens(m.inputTokens)} out:${formatCompactTokens(m.outputTokens)} ca:${formatCompactTokens(m.cacheTokens)}`
+          : ` in:${formatCompactTokens(m.inputTokens)} out:${formatCompactTokens(m.outputTokens)}`;
+        const detailW = Math.max(1, sidebarW - 8);
+        out += moveTo(sRow + 1, 1) + '  ' + barStr + fg(RGB.muted, trunc(detailRaw, detailW)) + fg(RGB.border, '│');
+        sRow += 2;
+      }
+    }
+    if (sRow + 2 < rows) {
+      out += moveTo(sRow, 1) + fg(RGB.border, '─'.repeat(sidebarW - 1) + '┤');
+      sRow++;
+    }
   }
   if (sRow + 2 < rows) {
     const innerW = sidebarW - 2;
@@ -255,25 +345,36 @@ function render() {
     }
 
     const isFocus = pane.id === focusedId;
-    const borderRgb = pane.done ? RGB.green : pane.attention ? RGB.blue : isFocus ? RGB.focus : RGB.border;
+    const borderRgb = pane.done ? donePulseRgb : pane.attention ? RGB.blue : isFocus ? RGB.focus : RGB.border;
+    const paintBorder = (s) => pane.done ? bg(doneBorderBg, fg(borderRgb, s)) : fg(borderRgb, s);
+    const ch = pane.done
+      ? { tl: '┏', tr: '┓', bl: '┗', br: '┛', h: '━', v: '┃' }
+      : { tl: '┌', tr: '┐', bl: '└', br: '┘', h: '─', v: '│' };
     const gColor = RGB[pane.group] || RGB.isolated;
     const gLabel = (GROUPS[pane.group] || GROUPS.isolated).label;
     const isScrolled = term.buffer.active.viewportY < term.buffer.active.baseY;
 
     const hdrPrefix = ` [${pane.num}] ${pane.role} `;
     const hdrGroup = `(${gLabel})`;
-    const hdrTxt = `${hdrPrefix}${hdrGroup}${pane.remoteControl ? ' [RC]' : ''}${isScrolled ? ' [HISTORIAL]' : ''} `;
-    const topLine = '┌' + hdrTxt.slice(0, innerW).padEnd(innerW, '─') + '┐';
-    out += moveTo(r, c) + fg(borderRgb, topLine.replace(hdrGroup, fg(gColor, hdrGroup)));
+    const doneTag = pane.done ? ' [LISTO]' : '';
+    const hdrTxt = `${hdrPrefix}${hdrGroup}${pane.remoteControl ? ' [RC]' : ''}${doneTag}${isScrolled ? ' [HISTORIAL]' : ''} `;
+    const topLine = ch.tl + hdrTxt.slice(0, innerW).padEnd(innerW, ch.h) + ch.tr;
+    const restoreBorder = pane.done ? `\x1b[48;2;${doneBorderBg}m\x1b[38;2;${borderRgb}m` : `\x1b[38;2;${borderRgb}m`;
+    let paintedTop = paintBorder(topLine)
+      .replace(hdrGroup, fg(gColor, hdrGroup) + restoreBorder);
+    if (doneTag) {
+      paintedTop = paintedTop.replace(doneTag, bg(donePulseRgb, bold(' LISTO ')) + restoreBorder);
+    }
+    out += moveTo(r, c) + paintedTop;
 
     lastGridBoxes[lastGridBoxes.length - 1].hdrGroupStart = c + 1 + hdrPrefix.length;
     lastGridBoxes[lastGridBoxes.length - 1].hdrGroupEnd = c + 1 + hdrPrefix.length + hdrGroup.length - 1;
 
     for (let i = 0; i < innerH; i++) {
       const lineStr = readTermLine(term, i, innerW);
-      out += moveTo(r + 1 + i, c) + fg(borderRgb, '│') + lineStr + fg(borderRgb, '│');
+      out += moveTo(r + 1 + i, c) + paintBorder(ch.v) + lineStr + paintBorder(ch.v);
     }
-    out += moveTo(r + h - 1, c) + fg(borderRgb, '└' + '─'.repeat(innerW) + '┘');
+    out += moveTo(r + h - 1, c) + paintBorder(ch.bl + ch.h.repeat(innerW) + ch.br);
 
     if (isFocus && !promptMode) {
       const curY = r + 1 + Math.min(innerH - 1, term.buffer.active.cursorY);
@@ -311,7 +412,11 @@ function handleMouse(str) {
   while ((m = regex.exec(str)) !== null) {
     handled = true;
     const btn = Number(m[1]), col = Number(m[2]), row = Number(m[3]), kind = m[4];
-    if (kind !== 'M') continue;
+
+    if (kind === 'm') {
+      dragState = null;
+      continue;
+    }
 
     // Mouse wheel up (64) / down (65) -> scroll hovered pane
     if (btn === 64 || btn === 65) {
@@ -327,14 +432,65 @@ function handleMouse(str) {
       continue;
     }
 
+    // Mouse drag while left button held (btn === 32)
+    if (btn === 32 && dragState) {
+      if (dragState.kind === 'resize-sidebar') {
+        customSidebarW = Math.max(16, Math.min(lastLayout.cols - 24, col));
+        statusBanner = ` Ancho panel lateral: ${customSidebarW}`;
+        scheduleRender();
+      } else if (dragState.kind === 'resize-grid-x') {
+        splitRatioX = Math.max(0.2, Math.min(0.8, (col - lastLayout.gridX) / lastLayout.gridW));
+        scheduleRender();
+      } else if (dragState.kind === 'resize-grid-y') {
+        splitRatioY = Math.max(0.2, Math.min(0.8, (row - 2) / lastLayout.bodyH));
+        scheduleRender();
+      } else if (dragState.kind === 'move-pane') {
+        if (Math.abs(col - dragState.startCol) > 1 || Math.abs(row - dragState.startRow) > 0) {
+          dragState.moved = true;
+        }
+        if (dragState.moved) {
+          const targetCard = col < lastLayout.sidebarW && lastSidebarCards.find(c => row >= c.rStart && row <= c.rEnd);
+          const targetBox = col >= lastLayout.gridX && lastGridBoxes.find(b => col >= b.c && col < b.c + b.w && row >= b.r && row < b.r + b.h);
+          const targetId = targetCard ? targetCard.id : (targetBox ? targetBox.id : null);
+          if (targetId && targetId !== dragState.paneId && swapPanes(dragState.paneId, targetId)) {
+            focusedId = dragState.paneId;
+            statusBanner = ' Panel reordenado';
+            scheduleRender();
+          }
+        }
+      }
+      continue;
+    }
+
     if (btn !== 0) continue;
 
+    // 1. Check divider hits for resizing sections
+    if (row >= 2 && row < lastLayout.rows) {
+      if (Math.abs(col - lastLayout.sidebarW) <= 1) {
+        dragState = { kind: 'resize-sidebar' };
+        continue;
+      }
+      if (lastGridBoxes.length >= 2 && Math.abs(col - lastGridBoxes[1].c) <= 1) {
+        dragState = { kind: 'resize-grid-x' };
+        continue;
+      }
+      if (lastGridBoxes.length >= 3) {
+        const hSplitRow = lastGridBoxes[2].r;
+        const hMinCol = lastGridBoxes.length === 3 ? lastGridBoxes[1].c : lastLayout.gridX;
+        if (Math.abs(row - hSplitRow) <= 1 && col >= hMinCol) {
+          dragState = { kind: 'resize-grid-y' };
+          continue;
+        }
+      }
+    }
+
     for (const card of lastSidebarCards) {
-      if (row >= card.rStart && row <= card.rEnd && col <= 30) {
+      if (row >= card.rStart && row <= card.rEnd && col < lastLayout.sidebarW) {
         focusedId = card.id;
+        dragState = { kind: 'move-pane', paneId: card.id, startCol: col, startRow: row, moved: false };
         const p = panes.get(focusedId);
         if (p) {
-          p.attention = false; p.done = false; p.notified = false;
+          p.clearAlerts();
           if (row === card.pillRow && col >= card.pillColStart && col <= card.pillColEnd) {
             const next = GROUP_ORDER[(GROUP_ORDER.indexOf(p.group) + 1) % GROUP_ORDER.length];
             p.group = next;
@@ -349,9 +505,12 @@ function handleMouse(str) {
     for (const box of lastGridBoxes) {
       if (col >= box.c && col < box.c + box.w && row >= box.r && row < box.r + box.h) {
         focusedId = box.id;
+        if (row === box.r && !(col >= box.hdrGroupStart && col <= box.hdrGroupEnd)) {
+          dragState = { kind: 'move-pane', paneId: box.id, startCol: col, startRow: row, moved: false };
+        }
         const p = panes.get(focusedId);
         if (p) {
-          p.attention = false; p.done = false; p.notified = false;
+          p.clearAlerts();
           if (row === box.r && col >= box.hdrGroupStart && col <= box.hdrGroupEnd) {
             const next = GROUP_ORDER[(GROUP_ORDER.indexOf(p.group) + 1) % GROUP_ORDER.length];
             p.group = next;
@@ -389,9 +548,9 @@ function handleKeyInput(buf) {
     if (/^[n\x1b]$/i.test(str)) {
       pendingRestore = null;
       if (panes.size === 0) {
-        createPane({ role: 'Agente Principal', cwd: process.cwd(), group: 'isolated' });
+        createPane({ role: 'Agente Principal', cwd: process.cwd(), group: 'isolated', autoAgy: true });
       }
-      statusBanner = ' Sesión iniciada desde cero.';
+      statusBanner = ' Sesión iniciada desde cero con agy.';
       scheduleRender();
       return;
     }
@@ -470,7 +629,7 @@ function handleKeyInput(buf) {
       const step = str === '\x1b[Z' ? -1 : 1;
       focusedId = keys[(keys.indexOf(focusedId) + step + keys.length) % keys.length];
       const p = panes.get(focusedId);
-      if (p) { p.attention = false; p.done = false; p.notified = false; }
+      if (p) p.clearAlerts();
       scheduleRender();
     }
     return;
@@ -483,17 +642,19 @@ function handleKeyInput(buf) {
     if (term && term.buffer.active.viewportY < term.buffer.active.baseY) {
       term.scrollToBottom();
     }
-    p.attention = false;
-    p.done = false;
-    p.notified = false;
-    p.status = 'Running';
+    if (str.includes('\r') || str.includes('\n')) {
+      p.markCommandStart();
+      p.status = 'Running';
+    } else {
+      p.clearAlerts();
+    }
     p.write(str);
   }
 }
 
 function cleanupAndExit() {
   saveSessionState();
-  process.stdout.write('\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l');
+  process.stdout.write('\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?25h\x1b[?1049l');
   for (const p of panes.values()) p.kill();
   process.exit(0);
 }
@@ -506,12 +667,13 @@ async function main() {
     notifyWindows('/deck · Sesión anterior encontrada', `¿Quieres restaurar ${pendingRestore.panes.length} paneles (${names})? Presiona [S] en /deck.`);
   }
   setInterval(saveSessionState, 15000).unref();
+  setInterval(scheduleRender, 5000).unref();
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
   process.stdin.resume();
   process.stdin.on('data', handleKeyInput);
-  // Enable alt-screen and SGR mouse AFTER setRawMode(true) so libuv doesn't reset console flags on Windows
-  process.stdout.write('\x1b[?1049h\x1b[?1000h\x1b[?1006h');
-  setTimeout(() => process.stdout.write('\x1b[?1000h\x1b[?1006h'), 300);
+  // Enable alt-screen and SGR button-event mouse tracking AFTER setRawMode(true) so libuv doesn't reset console flags on Windows
+  process.stdout.write('\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1006h');
+  setTimeout(() => process.stdout.write('\x1b[?1000h\x1b[?1002h\x1b[?1006h'), 300);
   process.stdout.on('resize', scheduleRender);
   process.on('SIGINT', cleanupAndExit);
   process.on('SIGHUP', cleanupAndExit);

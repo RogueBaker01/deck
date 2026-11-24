@@ -17,6 +17,10 @@ try {
 const PORT = Number(process.env.DECK_PORT || 4777);
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const AGY_DIR = path.join(os.homedir(), '.gemini', 'antigravity-cli');
+const BRAIN_DIRS = [
+  path.join(AGY_DIR, 'brain'),
+  path.join(os.homedir(), '.gemini', 'antigravity', 'brain')
+];
 const STATE_FILE = path.join(__dirname, '.deck-state.json');
 
 const GROUPS = {
@@ -91,28 +95,187 @@ function scanAntigravitySubagents() {
   return results;
 }
 
-function notifyWindows(title, message, kind = 'done') {
+const usageFileCache = new Map();
+let cachedUsageResult = null;
+let lastUsageScanAt = 0;
+
+function formatCompactTokens(n) {
+  const num = Number(n || 0);
+  if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+  if (num >= 1_000) return `${(num / 1_000).toFixed(num >= 100_000 ? 0 : 1).replace(/\.0$/, '')}k`;
+  return String(num);
+}
+
+function formatModelName(rawModel) {
+  const id = String(rawModel || '').trim();
+  if (!id) return { label: 'Desconocido', family: 'other' };
+  const tierMap = { low: 'L', medium: 'M', high: 'H', xhigh: 'XH' };
+  let family = 'other';
+  if (/hydrogen/i.test(id)) family = 'hydrogen';
+  else if (/carbon/i.test(id)) family = 'carbon';
+  else if (/argon/i.test(id)) family = 'argon';
+  else if (/neon/i.test(id)) family = 'neon';
+  else if (/claude|sonnet|opus/i.test(id)) family = 'claude';
+  else if (/flash/i.test(id)) family = 'flash';
+
+  const g4 = id.match(/^gemini-4-([a-z]+)-(low|medium|high|xhigh)$/i);
+  if (g4) {
+    const name = g4[1].charAt(0).toUpperCase() + g4[1].slice(1);
+    return { label: `G4 ${name} (${tierMap[g4[2].toLowerCase()]})`, family };
+  }
+  const gFlash = id.match(/^gemini-([\d.]+)-flash-(low|medium|high|xhigh)$/i);
+  if (gFlash) {
+    return { label: `G${gFlash[1]} Flash (${tierMap[gFlash[2].toLowerCase()]})`, family: 'flash' };
+  }
+  const claude = id.match(/^claude-(opus|sonnet)-(\d+)-(\d+)-(low|medium|high)$/i);
+  if (claude) {
+    const name = claude[1].charAt(0).toUpperCase() + claude[1].slice(1);
+    return { label: `${name} ${claude[2]}.${claude[3]} (${tierMap[claude[4].toLowerCase()]})`, family: 'claude' };
+  }
+  if (/orchestrator/i.test(id)) {
+    const sub = id.match(/orchestrator-([a-z]+)/i);
+    return { label: sub ? `Orch (${sub[1].charAt(0).toUpperCase() + sub[1].slice(1)})` : 'Orchestrator', family };
+  }
+  return { label: id.replace(/^gemini-/i, 'G-').slice(0, 20), family };
+}
+
+function scanModelUsage(opts = {}) {
+  const now = Date.now();
+  const customDirs = Array.isArray(opts.brainDirs) ? opts.brainDirs : null;
+  if (!customDirs && !opts.force && cachedUsageResult && now - lastUsageScanAt < 3000) {
+    return cachedUsageResult;
+  }
+
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  const startMs = opts.sinceMs !== undefined ? opts.sinceMs : startOfDay.getTime();
+  const dayKey = `${startOfDay.getFullYear()}-${startOfDay.getMonth()}-${startOfDay.getDate()}`;
+  const dirs = customDirs || BRAIN_DIRS;
+  const totals = new Map();
+
+  for (const brainDir of dirs) {
+    if (!fs.existsSync(brainDir)) continue;
+    let convDirs = [];
+    try { convDirs = fs.readdirSync(brainDir, { withFileTypes: true }); } catch { continue; }
+
+    for (const d of convDirs) {
+      if (!d.isDirectory()) continue;
+      const tPath = path.join(brainDir, d.name, '.system_generated', 'logs', 'transcript.jsonl');
+      let mtimeMs = 0;
+      try { mtimeMs = fs.statSync(tPath).mtimeMs; } catch { continue; }
+      if (mtimeMs < startMs) continue;
+
+      let fileSummary = !customDirs ? usageFileCache.get(tPath) : null;
+      if (!fileSummary || fileSummary.mtimeMs !== mtimeMs || fileSummary.dayKey !== dayKey) {
+        const perModel = {};
+        try {
+          const lines = fs.readFileSync(tPath, 'utf8').split('\n');
+          for (const line of lines) {
+            if (!line.includes('"model"')) continue;
+            let entry;
+            try { entry = JSON.parse(line); } catch { continue; }
+            if (!entry || !entry.model) continue;
+            if (entry.created_at) {
+              const ts = Date.parse(entry.created_at);
+              if (!Number.isNaN(ts) && ts < startMs) continue;
+            }
+            const m = entry.model;
+            if (!perModel[m]) perModel[m] = { turns: 0, in: 0, out: 0, cache: 0 };
+            perModel[m].turns += 1;
+            perModel[m].in += Number(entry.input_tokens || 0);
+            perModel[m].out += Number(entry.output_tokens || 0);
+            perModel[m].cache += Number(entry.cache_read_tokens || 0);
+          }
+        } catch { continue; }
+        fileSummary = { mtimeMs, dayKey, perModel };
+        if (!customDirs) usageFileCache.set(tPath, fileSummary);
+      }
+
+      for (const [m, s] of Object.entries(fileSummary.perModel)) {
+        const cur = totals.get(m) || { turns: 0, in: 0, out: 0, cache: 0 };
+        cur.turns += s.turns;
+        cur.in += s.in;
+        cur.out += s.out;
+        cur.cache += s.cache;
+        totals.set(m, cur);
+      }
+    }
+  }
+
+  let totalIn = 0, totalOut = 0, totalCache = 0, totalTurns = 0;
+  const models = [];
+  for (const [id, s] of totals.entries()) {
+    const activeTokens = s.in + s.out;
+    totalIn += s.in;
+    totalOut += s.out;
+    totalCache += s.cache;
+    totalTurns += s.turns;
+    const { label, family } = formatModelName(id);
+    models.push({
+      id,
+      label,
+      family,
+      turns: s.turns,
+      inputTokens: s.in,
+      outputTokens: s.out,
+      cacheTokens: s.cache,
+      activeTokens,
+      totalTokens: activeTokens + s.cache
+    });
+  }
+
+  models.sort((a, b) => b.activeTokens - a.activeTokens || b.turns - a.turns);
+  const maxActive = models.length ? Math.max(1, models[0].activeTokens) : 1;
+  for (const m of models) {
+    m.share = Math.min(1, m.activeTokens / maxActive);
+  }
+
+  const res = {
+    totalIn,
+    totalOut,
+    totalCache,
+    totalActive: totalIn + totalOut,
+    totalTurns,
+    models
+  };
+  if (!customDirs) {
+    cachedUsageResult = res;
+    lastUsageScanAt = now;
+  }
+  return res;
+}
+
+function escapeXml(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+const AGY_LOGO_PATH = path.join(
+  process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'),
+  'Programs', 'Antigravity IDE', 'resources', 'app', 'extensions', 'agy', 'img', 'logo.png'
+);
+
+const NOTIFY_SCRIPT = path.join(__dirname, 'notify.ps1');
+
+function notifyWindows(summary, message, kind = 'done') {
   if (process.env.DECK_NO_NOTIFY === '1') return;
-  const safeTitle = String(title || '/deck').replace(/'/g, "''").slice(0, 60);
-  const safeMsg = String(message || 'Tarea finalizada').replace(/'/g, "''").slice(0, 140);
-  const beepCmd = kind === 'waiting'
-    ? '[console]::beep(660, 160); [console]::beep(990, 240)'
-    : '[console]::beep(880, 140); [console]::beep(1175, 240)';
-  const ps = [
-    'Add-Type -AssemblyName System.Windows.Forms, System.Drawing',
-    '[System.Media.SystemSounds]::Exclamation.Play()',
-    beepCmd,
-    '$n = New-Object System.Windows.Forms.NotifyIcon',
-    '$n.Icon = [System.Drawing.SystemIcons]::Information',
-    '$n.Visible = $true',
-    `$n.ShowBalloonTip(4000, '${safeTitle}', '${safeMsg}', [System.Windows.Forms.ToolTipIcon]::Info)`,
-    '[System.Windows.Forms.Application]::DoEvents()',
-    'Start-Sleep -Milliseconds 4200',
-    '$n.Dispose()'
-  ].join('; ');
+  const safeSummary = String(summary || 'Tarea finalizada').slice(0, 80);
+  const safeMsg = String(message || '').slice(0, 140);
+  const logoArg = fs.existsSync(AGY_LOGO_PATH) ? AGY_LOGO_PATH : '';
   try {
-    const encoded = Buffer.from(ps, 'utf16le').toString('base64');
-    spawn('powershell.exe', ['-NoProfile', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], {
+    spawn('powershell.exe', [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+      '-File', NOTIFY_SCRIPT,
+      '-Title', 'Antigravity',
+      '-Summary', safeSummary,
+      '-Detail', safeMsg,
+      '-LogoPath', logoArg,
+      '-Kind', kind === 'waiting' ? 'waiting' : 'done'
+    ], {
       detached: true,
       stdio: 'ignore',
       windowsHide: true
@@ -238,8 +401,23 @@ function broadcastState() {
     type: 'state',
     groups: GROUPS,
     panes: Array.from(panes.values()).map(serializePane),
-    agySessions: scanAntigravitySubagents()
+    agySessions: scanAntigravitySubagents(),
+    modelUsage: scanModelUsage()
   });
+}
+
+function swapPanes(idA, idB) {
+  if (!idA || !idB || idA === idB || !panes.has(idA) || !panes.has(idB)) return false;
+  const entries = Array.from(panes.entries());
+  const idxA = entries.findIndex(([k]) => k === idA);
+  const idxB = entries.findIndex(([k]) => k === idB);
+  if (idxA === -1 || idxB === -1) return false;
+  [entries[idxA], entries[idxB]] = [entries[idxB], entries[idxA]];
+  panes.clear();
+  for (const [k, v] of entries) panes.set(k, v);
+  saveSessionState();
+  broadcastState();
+  return true;
 }
 
 function findPane(target) {
@@ -273,6 +451,7 @@ function flushQueue(pane) {
   if (!pane.queue.length || !pane.proc) return;
   const next = pane.queue.shift();
   const formatted = formatDeckMessage(pane, next.from, next.text, { reply: next.reply });
+  pane.markCommandStart();
   pane.write(`\r\n${formatted}\r\n`);
   const queuedEntry = commLog.find(e => e.to === pane.role && e.from === next.from && e.queued);
   if (queuedEntry) queuedEntry.queued = false;
@@ -308,6 +487,8 @@ function createPane(opts = {}) {
     status: 'Running',
     attention: false,
     done: false,
+    hasCommand: false,
+    turnOutputBytes: 0,
     outputBytes: 0,
     notified: false,
     remoteControl,
@@ -320,6 +501,20 @@ function createPane(opts = {}) {
     createdAt: Date.now(),
     proc: null,
     idleTimer: null,
+    markCommandStart: () => {
+      pane.hasCommand = true;
+      pane.turnOutputBytes = 0;
+      pane.done = false;
+      pane.attention = false;
+      pane.notified = false;
+    },
+    clearAlerts: () => {
+      pane.attention = false;
+      pane.done = false;
+      pane.notified = false;
+      pane.hasCommand = false;
+      pane.turnOutputBytes = 0;
+    },
     write: () => {},
     resize: () => {},
     kill: () => {}
@@ -343,16 +538,22 @@ function createPane(opts = {}) {
     if (startupFallback) clearTimeout(startupFallback);
     pane.write(`${startupCmd}\r`);
     if (opts.prompt) {
-      setTimeout(() => pane.write(`${opts.prompt}\r`), 1200);
+      setTimeout(() => {
+        pane.markCommandStart();
+        pane.write(`${opts.prompt}\r`);
+      }, 1200);
     }
   };
 
   const onOutput = (raw) => {
     pane.buffer = (pane.buffer + raw).slice(-40000);
     pane.outputBytes += raw.length;
-    pane.status = 'Running';
-    pane.done = false;
     const clean = stripAnsi(raw);
+    if (pane.hasCommand) {
+      pane.turnOutputBytes += clean.trim().length;
+      pane.status = 'Running';
+    }
+    pane.done = false;
     if (!pane.wasAgy && /Antigravity CLI/i.test(clean)) pane.wasAgy = true;
     if (startupCmd && !startupSent && /PS [^\r\n]*>\s*$/.test(clean)) {
       setTimeout(sendStartupCmd, 80);
@@ -366,7 +567,7 @@ function createPane(opts = {}) {
         if (!pane.notified) {
           pane.notified = true;
           events.emit('alert', { id: pane.id, kind: 'waiting' });
-          notifyWindows(`/deck · ${pane.role}`, `Esperando confirmación: ${pane.lastLine}`, 'waiting');
+          notifyWindows(`${pane.role} (${GROUPS[pane.group]?.label || 'Aislado'}) espera confirmación`, pane.lastLine, 'waiting');
         }
       }
     }
@@ -378,13 +579,14 @@ function createPane(opts = {}) {
     clearTimeout(pane.idleTimer);
     pane.idleTimer = setTimeout(() => {
       if (pane.status === 'Waiting') return;
-      pane.status = 'Done';
-      pane.done = true;
+      const completedCommand = pane.hasCommand && pane.turnOutputBytes > 120;
+      pane.status = completedCommand ? 'Done' : 'Ready';
+      pane.done = completedCommand;
       pane.attention = false;
-      if (pane.outputBytes > 250 && !pane.notified) {
+      if (completedCommand && !pane.notified) {
         pane.notified = true;
         events.emit('alert', { id: pane.id, kind: 'done' });
-        notifyWindows(`/deck · ${pane.role} terminó`, pane.lastLine || 'CLI listo para revisar', 'done');
+        notifyWindows(`${pane.role} (${GROUPS[pane.group]?.label || 'Aislado'}) terminó la tarea`, pane.lastLine || 'CLI listo para revisar', 'done');
       }
       flushQueue(pane);
       broadcastState();
@@ -437,7 +639,10 @@ function createPane(opts = {}) {
   if (startupCmd) {
     startupFallback = setTimeout(sendStartupCmd, 2000);
   } else if (opts.prompt) {
-    setTimeout(() => pane.write(`${opts.prompt}\r`), 1200);
+    setTimeout(() => {
+      pane.markCommandStart();
+      pane.write(`${opts.prompt}\r`);
+    }, 1200);
   }
 
   broadcastState();
@@ -480,6 +685,7 @@ function sendGroupMessage({ fromId, toTarget, text, force = false, reply = false
   }
 
   const formatted = formatDeckMessage(receiver, fromName, text, { reply: Boolean(reply) });
+  receiver.markCommandStart();
   receiver.write(`${formatted}\r`);
   broadcastState();
   return { ok: true, queued: false, to: receiver.role, group: receiver.group, formatted };
@@ -509,7 +715,7 @@ const server = http.createServer(async (req, res) => {
       list = groupFilter === 'isolated' ? [] : list.filter(p => p.group === groupFilter);
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, groups: GROUPS, panes: list, agySessions: scanAntigravitySubagents() }));
+    return res.end(JSON.stringify({ ok: true, groups: GROUPS, panes: list, agySessions: scanAntigravitySubagents(), modelUsage: scanModelUsage() }));
   }
 
   if (url.pathname === '/api/panes' && req.method === 'POST') {
@@ -593,7 +799,8 @@ wss.on('connection', (ws) => {
     type: 'state',
     groups: GROUPS,
     panes: Array.from(panes.values()).map(serializePane),
-    agySessions: scanAntigravitySubagents()
+    agySessions: scanAntigravitySubagents(),
+    modelUsage: scanModelUsage()
   }));
   for (const p of panes.values()) {
     if (p.buffer) ws.send(JSON.stringify({ type: 'output', id: p.id, data: p.buffer }));
@@ -605,15 +812,19 @@ wss.on('connection', (ws) => {
       if (msg.type === 'input') {
         const p = panes.get(msg.id);
         if (p) {
-          p.attention = false;
-          p.status = 'Running';
+          if (String(msg.data || '').includes('\r') || String(msg.data || '').includes('\n')) {
+            p.markCommandStart();
+            p.status = 'Running';
+          } else {
+            p.clearAlerts();
+          }
           p.write(msg.data);
           broadcastState();
         }
       } else if (msg.type === 'focus') {
         const p = panes.get(msg.id);
-        if (p && p.attention) {
-          p.attention = false;
+        if (p && (p.attention || p.done)) {
+          p.clearAlerts();
           broadcastState();
         }
       } else if (msg.type === 'resize') {
@@ -630,7 +841,7 @@ function startServer(port = PORT, opts = {}) {
   return new Promise((resolve) => {
     server.listen(port, '127.0.0.1', () => {
       if (panes.size === 0 && !opts.noDefaultPane && process.env.DECK_NO_DEFAULT_PANE !== '1') {
-        createPane({ role: 'Agente Principal', cwd: process.cwd(), group: 'isolated' });
+        createPane({ role: 'Agente Principal', cwd: process.cwd(), group: 'isolated', autoAgy: true });
       }
       resolve(server);
     });
@@ -643,4 +854,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { startServer, createPane, sendGroupMessage, findPane, panes, GROUPS, events, commLog, saveSessionState, loadPreviousSession, restorePreviousSession, notifyWindows };
+module.exports = { startServer, createPane, sendGroupMessage, findPane, swapPanes, panes, GROUPS, events, commLog, saveSessionState, loadPreviousSession, restorePreviousSession, notifyWindows, scanModelUsage, formatModelName, formatCompactTokens };

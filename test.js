@@ -1,13 +1,23 @@
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 process.env.DECK_NO_DEFAULT_PANE = '1';
 process.env.DECK_NO_STATE = '1';
-const { createPane, sendGroupMessage, findPane, restorePreviousSession, startServer, panes, GROUPS, commLog } = require('./server');
+const { createPane, sendGroupMessage, findPane, swapPanes, restorePreviousSession, startServer, panes, GROUPS, commLog, scanModelUsage, formatModelName, formatCompactTokens } = require('./server');
 
 // 1. Default isolation check
 const pUsb = createPane({ role: 'Resetear USB', group: 'isolated' });
 const pResearch = createPane({ role: 'Investigar Paper', group: 'isolated' });
 assert.strictEqual(pUsb.group, 'isolated');
 assert.strictEqual(pResearch.group, 'isolated');
+assert.strictEqual(pUsb.done, false, 'Fresh pane must not be marked done');
+assert.strictEqual(pUsb.hasCommand, false, 'Fresh pane must not have an active command');
+pUsb.markCommandStart();
+assert.strictEqual(pUsb.hasCommand, true);
+pUsb.clearAlerts();
+assert.strictEqual(pUsb.hasCommand, false);
+assert.strictEqual(pUsb.done, false);
 
 // 2. Blocked message between isolated panes
 const blocked1 = sendGroupMessage({ fromId: pUsb.id, toTarget: 'Investigar Paper', text: 'hola' });
@@ -47,6 +57,12 @@ assert.ok(!replyMsg.formatted.includes('--reply'), 'Reply messages must not ask 
 const selfBlocked = sendGroupMessage({ fromId: pFront.id, toTarget: 'front', text: 'eco' });
 assert.strictEqual(selfBlocked.ok, false, 'Self-send must be blocked');
 
+// 5c. Swapping panes updates order in-place
+const swapped = swapPanes(pFront.id, pBack.id);
+assert.strictEqual(swapped, true);
+const idsAfterSwap = Array.from(panes.keys());
+assert.ok(idsAfterSwap.indexOf(pBack.id) < idsAfterSwap.indexOf(pFront.id), 'swapPanes must reorder panes');
+
 // 6. Restore preserves conversationId per pane without duplicating --continue
 const restoredCount = restorePreviousSession({
   panes: [
@@ -60,7 +76,28 @@ assert.strictEqual(restoredList[0].conversationId, 'conv-111');
 assert.strictEqual(restoredList[1].conversationId, 'conv-222');
 assert.strictEqual(restoredList[1].remoteControl, true);
 
-// 7. startServer with noDefaultPane leaves panes empty until user chooses [S] or [N]
+// 7. Model usage scanner aggregates today's tokens per model accurately
+const tmpBrain = fs.mkdtempSync(path.join(os.tmpdir(), 'deck-brain-'));
+const convLogDir = path.join(tmpBrain, 'conv-test-1', '.system_generated', 'logs');
+fs.mkdirSync(convLogDir, { recursive: true });
+const nowIso = new Date().toISOString();
+fs.writeFileSync(path.join(convLogDir, 'transcript.jsonl'), [
+  JSON.stringify({ model: 'gemini-4-carbon-medium', input_tokens: 12000, output_tokens: 3000, cache_read_tokens: 50000, created_at: nowIso }),
+  JSON.stringify({ model: 'gemini-4-carbon-medium', input_tokens: 8000, output_tokens: 2000, cache_read_tokens: 60000, created_at: nowIso }),
+  JSON.stringify({ model: 'gemini-4-hydrogen-high', input_tokens: 4000, output_tokens: 1000, cache_read_tokens: 0, created_at: nowIso })
+].join('\n'));
+const usage = scanModelUsage({ brainDirs: [tmpBrain], sinceMs: 0 });
+assert.strictEqual(usage.models.length, 2, 'Should detect 2 distinct models');
+assert.strictEqual(usage.models[0].label, 'G4 Carbon (M)');
+assert.strictEqual(usage.models[0].turns, 2);
+assert.strictEqual(usage.models[0].activeTokens, 25000);
+assert.strictEqual(usage.models[1].label, 'G4 Hydrogen (H)');
+assert.strictEqual(usage.models[1].activeTokens, 5000);
+assert.strictEqual(formatCompactTokens(25000), '25k');
+assert.strictEqual(formatModelName('claude-sonnet-5-5-medium').label, 'Sonnet 5.5 (M)');
+fs.rmSync(tmpBrain, { recursive: true, force: true });
+
+// 8. startServer with noDefaultPane leaves panes empty until user chooses [S] or [N]
 (async () => {
   for (const p of panes.values()) p.kill();
   panes.clear();
