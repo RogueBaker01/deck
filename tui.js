@@ -196,9 +196,12 @@ function render() {
     const highlightColor = p.done ? RGB.green : p.attention ? RGB.blue : null;
     const bar = highlightColor ? fg(highlightColor, '┃') : fg(gColor, '┃');
     const titleStr = `[${p.num}] ${p.role}`;
-    const pill = bg(gColor, ` ${gMeta.label} `);
+    const pillText = ` ${gMeta.label} `;
+    const pill = bg(gColor, pillText);
     const innerW = sidebarW - 2;
     const padTitle = Math.max(1, innerW - gMeta.label.length - 3);
+    const pillColStart = 2 + padTitle;
+    const pillColEnd = pillColStart + pillText.length - 1;
 
     out += moveTo(sRow, 1) + bar + bg(cardBg, trunc(titleStr, padTitle) + pill) + fg(RGB.border, '│');
     const subTxt = p.subagents && p.subagents.length ? `↳ ${p.subagents.join(', ')}` : (p.lastLine || 'Listo');
@@ -207,7 +210,7 @@ function render() {
     out += moveTo(sRow + 2, 1) + bar + bg(cardBg, fg(RGB.muted, trunc(metaTxt, innerW))) + fg(RGB.border, '│');
     out += moveTo(sRow + 3, 1) + fg(highlightColor || RGB.border, '─'.repeat(sidebarW - 1) + '┤');
 
-    lastSidebarCards.push({ id: p.id, rStart: sRow, rEnd: sRow + 3 });
+    lastSidebarCards.push({ id: p.id, rStart: sRow, rEnd: sRow + 3, pillRow: sRow, pillColStart, pillColEnd });
     sRow += 4;
   }
   while (sRow < rows) {
@@ -237,9 +240,14 @@ function render() {
     const gLabel = (GROUPS[pane.group] || GROUPS.isolated).label;
     const isScrolled = term.buffer.active.viewportY < term.buffer.active.baseY;
 
-    const hdrTxt = ` [${pane.num}] ${pane.role} (${gLabel})${pane.remoteControl ? ' [RC]' : ''}${isScrolled ? ' [HISTORIAL]' : ''} `;
+    const hdrPrefix = ` [${pane.num}] ${pane.role} `;
+    const hdrGroup = `(${gLabel})`;
+    const hdrTxt = `${hdrPrefix}${hdrGroup}${pane.remoteControl ? ' [RC]' : ''}${isScrolled ? ' [HISTORIAL]' : ''} `;
     const topLine = '┌' + hdrTxt.slice(0, innerW).padEnd(innerW, '─') + '┐';
-    out += moveTo(r, c) + fg(borderRgb, topLine.replace(`(${gLabel})`, fg(gColor, `(${gLabel})`)));
+    out += moveTo(r, c) + fg(borderRgb, topLine.replace(hdrGroup, fg(gColor, hdrGroup)));
+
+    lastGridBoxes[lastGridBoxes.length - 1].hdrGroupStart = c + 1 + hdrPrefix.length;
+    lastGridBoxes[lastGridBoxes.length - 1].hdrGroupEnd = c + 1 + hdrPrefix.length + hdrGroup.length - 1;
 
     for (let i = 0; i < innerH; i++) {
       const lineStr = readTermLine(term, i, innerW);
@@ -305,7 +313,15 @@ function handleMouse(str) {
       if (row >= card.rStart && row <= card.rEnd && col <= 30) {
         focusedId = card.id;
         const p = panes.get(focusedId);
-        if (p) { p.attention = false; p.done = false; p.notified = false; }
+        if (p) {
+          p.attention = false; p.done = false; p.notified = false;
+          if (row === card.pillRow && col >= card.pillColStart && col <= card.pillColEnd) {
+            const next = GROUP_ORDER[(GROUP_ORDER.indexOf(p.group) + 1) % GROUP_ORDER.length];
+            p.group = next;
+            statusBanner = ` [${p.role}] -> ${GROUPS[next].label}`;
+            saveSessionState();
+          }
+        }
         scheduleRender();
         break;
       }
@@ -314,7 +330,15 @@ function handleMouse(str) {
       if (col >= box.c && col < box.c + box.w && row >= box.r && row < box.r + box.h) {
         focusedId = box.id;
         const p = panes.get(focusedId);
-        if (p) { p.attention = false; p.done = false; p.notified = false; }
+        if (p) {
+          p.attention = false; p.done = false; p.notified = false;
+          if (row === box.r && col >= box.hdrGroupStart && col <= box.hdrGroupEnd) {
+            const next = GROUP_ORDER[(GROUP_ORDER.indexOf(p.group) + 1) % GROUP_ORDER.length];
+            p.group = next;
+            statusBanner = ` [${p.role}] -> ${GROUPS[next].label}`;
+            saveSessionState();
+          }
+        }
         scheduleRender();
         break;
       }
