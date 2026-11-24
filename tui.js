@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 const { Terminal } = require('@xterm/headless');
-const { startServer, createPane, sendGroupMessage, swapPanes, panes, GROUPS, events, commLog, saveSessionState, loadPreviousSession, restorePreviousSession, notifyWindows, scanModelUsage, formatCompactTokens, refreshModelQuota, getModelQuota, formatResetEta } = require('./server');
+const { startServer, createPane, sendGroupMessage, swapPanes, panes, GROUPS, events, commLog, saveSessionState, loadPreviousSession, restorePreviousSession, notifyWindows, refreshModelQuota, getModelQuota, formatResetEta } = require('./server');
 
 const GROUP_ORDER = ['isolated', 'A', 'B', 'C', 'D'];
 const RGB = {
@@ -280,8 +280,10 @@ function render() {
         const filled = Math.max(0, Math.min(barW, Math.round((pct / 100) * barW)));
         const barStr = fg(qCol, '█'.repeat(filled)) + fg(RGB.border, '░'.repeat(barW - filled));
         const eta = formatResetEta(pool.resetTime);
+        const isWeekly = pool.resetTime && (Date.parse(pool.resetTime) - Date.now()) > 24 * 3600000;
+        const scopeLabel = isWeekly ? `${pool.label} (Sem)` : pool.label;
         const nameW = Math.max(4, sidebarW - 4 - rightTxt.length - 1);
-        const nameStr = trunc(pool.label, nameW);
+        const nameStr = trunc(scopeLabel, nameW);
         const padMid = ' '.repeat(Math.max(1, (sidebarW - 4) - nameStr.length - rightTxt.length));
         out += moveTo(sRow, 1) + ' ' + fg(qCol, '•') + ' ' + fg(RGB.focus, nameStr) + padMid + fg(qCol, bold(rightTxt)) + fg(RGB.border, '│');
         const etaTxt = eta ? ` reset ${eta}` : '';
@@ -296,52 +298,6 @@ function render() {
         out += moveTo(sRow, 1) + fg(RGB.border, '─'.repeat(sidebarW - 1) + '┤');
         sRow++;
       }
-    }
-  }
-  if (sRow + 2 < rows) {
-    const usage = scanModelUsage();
-    const renderUsageBlock = (title, summary, maxItems) => {
-      if (sRow + 1 >= rows) return;
-      out += moveTo(sRow, 1) + fg(RGB.focus, bold(trunc(` ${title} · ${formatCompactTokens(summary.totalActive)} tok`, sidebarW - 1))) + fg(RGB.border, '│');
-      sRow++;
-      if (!summary.models.length) {
-        out += moveTo(sRow, 1) + fg(RGB.muted, trunc(' Sin actividad', sidebarW - 1)) + fg(RGB.border, '│');
-        sRow++;
-        return;
-      }
-      for (const m of summary.models.slice(0, maxItems)) {
-        if (sRow >= rows) break;
-        const mCol = MODEL_FAMILY_RGB[m.family] || RGB.focus;
-        const rightTxt = `${formatCompactTokens(m.activeTokens)}·${m.turns}t`;
-        if (sidebarW - 4 > rightTxt.length + 4) {
-          const nameW = (sidebarW - 4) - rightTxt.length - 1;
-          const nameStr = trunc(m.label, nameW);
-          const padMid = ' '.repeat(Math.max(1, (sidebarW - 4) - nameStr.length - rightTxt.length));
-          out += moveTo(sRow, 1) + ' ' + fg(mCol, '•') + ' ' + fg(RGB.focus, nameStr) + padMid + fg(mCol, rightTxt) + fg(RGB.border, '│');
-        } else {
-          out += moveTo(sRow, 1) + ' ' + fg(mCol, '•') + fg(RGB.focus, trunc(` ${m.label} ${rightTxt}`, sidebarW - 3)) + fg(RGB.border, '│');
-        }
-        sRow++;
-        if (sRow < rows && maxItems <= 3) {
-          const barW = 5;
-          const filled = Math.max(1, Math.min(barW, Math.round(m.share * barW)));
-          const barStr = fg(mCol, '█'.repeat(filled)) + fg(RGB.border, '░'.repeat(barW - filled));
-          const detailRaw = sidebarW >= 34
-            ? ` in:${formatCompactTokens(m.inputTokens)} out:${formatCompactTokens(m.outputTokens)} ca:${formatCompactTokens(m.cacheTokens)}`
-            : ` in:${formatCompactTokens(m.inputTokens)} out:${formatCompactTokens(m.outputTokens)}`;
-          out += moveTo(sRow, 1) + '  ' + barStr + fg(RGB.muted, trunc(detailRaw, Math.max(1, sidebarW - 8))) + fg(RGB.border, '│');
-          sRow++;
-        }
-      }
-    };
-
-    renderUsageBlock('Consumo Hoy', usage, Math.min(3, Math.max(1, Math.floor((rows - sRow) / 4))));
-    if (sRow + 2 < rows && usage.week) {
-      renderUsageBlock('Semana (7d)', usage.week, Math.min(3, Math.max(1, Math.floor((rows - sRow) / 3))));
-    }
-    if (sRow + 1 < rows) {
-      out += moveTo(sRow, 1) + fg(RGB.border, '─'.repeat(sidebarW - 1) + '┤');
-      sRow++;
     }
   }
   if (sRow + 2 < rows) {
