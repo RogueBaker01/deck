@@ -181,7 +181,7 @@ function render() {
   // 1. Topbar (Row 1)
   const alertTxt = (waitingCount > 0 ? bg(RGB.blue, bold(` ${waitingCount} esperando `)) + ' ' : '') +
                    (doneCount > 0 ? bg(RGB.green, bold(` ${doneCount} listo `)) + ' ' : '');
-  const topLeft = ` ${bold('/deck')} ${alertTxt}${fg(RGB.muted, '[F2]+Term [F3]+agy [F4]+agy-RC [F5]Grupo [F6]Rol [F7]Msg [F8]Cerrar [Ctrl+Q]Salir')}`;
+  const topLeft = ` ${bold('/deck')} ${alertTxt}${fg(RGB.muted, '[F1]+Term [F3]+agy [F4]+agy-RC [F5]Grupo [F6]Rol [F7]Msg [F8]Cerrar [Ctrl+Q]Salir')}`;
   out += moveTo(1, 1) + bg(RGB.bgTop, trunc(topLeft, cols + 40));
 
   // 2. Sidebar (Cols 1..sidebarW, Rows 2..rows-1)
@@ -382,7 +382,7 @@ function handleKeyInput(buf) {
   }
 
   // Function keys
-  if (str === '\x1bOQ') { // F2: +Terminal
+  if (str === '\x1bOP') { // F1: +Terminal
     const p = createPane({ role: `Terminal ${panes.size + 1}`, cwd: process.cwd(), group: 'isolated' });
     focusedId = p.id;
     return;
