@@ -3,7 +3,9 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execSync, spawn } = require('child_process');
+const EventEmitter = require('events');
 const { WebSocketServer } = require('ws');
+const events = new EventEmitter();
 
 let pty = null;
 try {
@@ -108,6 +110,7 @@ function serializePane(p) {
 }
 
 function broadcast(msg) {
+  events.emit(msg.type, msg);
   const data = JSON.stringify(msg);
   for (const ws of clients) {
     if (ws.readyState === 1) ws.send(data);
@@ -456,4 +459,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { startServer, createPane, sendGroupMessage, findPane, panes, GROUPS };
+module.exports = { startServer, createPane, sendGroupMessage, findPane, panes, GROUPS, events };

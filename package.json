@@ -1,16 +1,18 @@
 {
   "name": "agy-deck",
-  "version": "0.1.0",
-  "description": "Lightweight cmux-inspired terminal multiplexer for Google Antigravity (agy) on Windows",
-  "main": "server.js",
+  "version": "0.2.0",
+  "description": "Lightweight cmux-inspired TUI terminal multiplexer for Google Antigravity (agy) on Windows",
+  "main": "tui.js",
   "bin": {
     "deck": "./bin/deck.js"
   },
   "scripts": {
-    "start": "node server.js",
+    "start": "node tui.js",
+    "server": "node server.js",
     "test": "node test.js"
   },
   "dependencies": {
+    "@xterm/headless": "^5.5.0",
     "node-pty": "^1.1.0",
     "ws": "^8.18.0"
   },

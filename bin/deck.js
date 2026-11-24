@@ -25,54 +25,58 @@ function apiRequest(method, urlPath, body) {
   });
 }
 
-async function ensureDaemon() {
+async function isDaemonUp() {
   try {
     await apiRequest('GET', '/api/state');
     return true;
   } catch {
-    const serverPath = path.join(__dirname, '..', 'server.js');
-    const child = spawn(process.execPath, [serverPath], {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true
-    });
-    child.unref();
-    for (let i = 0; i < 15; i++) {
-      await new Promise(r => setTimeout(r, 150));
-      try {
-        await apiRequest('GET', '/api/state');
-        return true;
-      } catch {}
-    }
     return false;
   }
 }
 
-function openUI() {
-  const url = `${BASE}`;
-  // Try fast Edge/Chrome app-mode window (0 bloat, instant startup, native look)
-  const cmd = `
-    $edge = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
-    if (-not (Test-Path $edge)) { $edge = "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe" }
-    if (Test-Path $edge) {
-      Start-Process $edge -ArgumentList "--app=${url} --window-size=1420,860"
+function launchTerminalTUI() {
+  const tuiPath = path.join(__dirname, '..', 'tui.js');
+  // If invoked interactively directly from a user shell (not captured by agy tool), run TUI inline
+  if (process.stdout.isTTY && process.stdin.isTTY && !process.argv.includes('--tab')) {
+    require(tuiPath);
+    return;
+  }
+  // When invoked from inside `agy` via `/deck`, open a new tab in the current Windows Terminal window
+  const psCmd = `
+    $wt = Get-Command wt.exe -ErrorAction SilentlyContinue
+    if ($wt) {
+      Start-Process wt.exe -ArgumentList @('-w', '0', 'new-tab', '--title', '/deck', 'node', '${tuiPath}')
     } else {
-      Start-Process "${url}"
+      Start-Process powershell.exe -ArgumentList @('-NoLogo', '-Command', "node '${tuiPath}'")
     }
   `;
-  spawn('powershell.exe', ['-NoProfile', '-Command', cmd], { stdio: 'ignore', windowsHide: true });
+  spawn('powershell.exe', ['-NoProfile', '-Command', psCmd], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true
+  }).unref();
 }
 
 async function main() {
   const args = process.argv.slice(2);
   const cmd = args[0] || 'open';
 
-  await ensureDaemon();
-
-  if (cmd === 'open' || cmd === 'ui') {
-    openUI();
-    console.log(`/deck abierto en ${BASE}`);
+  if (cmd === 'open' || cmd === 'tui' || cmd === 'ui') {
+    const up = await isDaemonUp();
+    if (up && !process.stdout.isTTY) {
+      console.log('/deck ya está corriendo en tu terminal. Usa `deck list` o cambia a la pestaña `/deck` en Windows Terminal.');
+      return;
+    }
+    launchTerminalTUI();
+    if (!process.stdout.isTTY || args.includes('--tab')) {
+      console.log('/deck abierto directamente en una pestaña nativa de Windows Terminal.');
+    }
     return;
+  }
+
+  if (!(await isDaemonUp())) {
+    console.error('/deck no está activo aún. Ejecuta `/deck` primero para abrir el multiplexor en terminal.');
+    process.exit(1);
   }
 
   if (cmd === 'list' || cmd === 'peers') {
@@ -124,7 +128,6 @@ async function main() {
       console.log(`Panel [${res.pane?.role || target}] puesto en modo Aislado.`);
       return;
     }
-    // deck link <pane1> <pane2> [group=A]
     if (cmd === 'link' && args.length >= 3) {
       const p1 = args[1];
       const p2 = args[2];
@@ -157,8 +160,8 @@ async function main() {
     return;
   }
 
-  console.log(`Comandos de /deck:
-  deck open                          Abre la ventana visual de /deck
+  console.log(`Comandos de /deck (TUI nativo en terminal):
+  deck open                          Abre /deck directo en terminal
   deck list                          Lista todos los paneles y sus estados
   deck peers                         Lista solo los compañeros de tu mismo grupo
   deck spawn <rol> [--group A..D]    Crea un nuevo panel (aislado por defecto)
