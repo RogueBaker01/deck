@@ -4,7 +4,7 @@ const os = require('os');
 const path = require('path');
 process.env.DECK_NO_DEFAULT_PANE = '1';
 process.env.DECK_NO_STATE = '1';
-const { createPane, sendGroupMessage, findPane, swapPanes, restorePreviousSession, startServer, panes, GROUPS, commLog, scanModelUsage, formatModelName, formatCompactTokens } = require('./server');
+const { createPane, sendGroupMessage, findPane, swapPanes, restorePreviousSession, startServer, panes, GROUPS, commLog, scanModelUsage, formatModelName, formatCompactTokens, summarizeQuotaPayload } = require('./server');
 
 // 1. Default isolation check
 const pUsb = createPane({ role: 'Resetear USB', group: 'isolated' });
@@ -96,6 +96,25 @@ assert.strictEqual(usage.models[1].activeTokens, 5000);
 assert.strictEqual(formatCompactTokens(25000), '25k');
 assert.strictEqual(formatModelName('claude-sonnet-5-5-medium').label, 'Sonnet 5.5 (M)');
 fs.rmSync(tmpBrain, { recursive: true, force: true });
+
+// 7b. Quota summarizer computes remaining percentages and pools accurately
+const quotaSummary = summarizeQuotaPayload({
+  userStatus: {
+    planStatus: { planInfo: { planName: 'Pro' }, availablePromptCredits: 500, availableFlowCredits: 100 },
+    cascadeModelConfigData: {
+      clientModelConfigs: [
+        { label: 'Gemini 4 Neon (High)', quotaInfo: { remainingFraction: 0.3899, resetTime: '2026-11-25T02:55:47Z' } },
+        { label: 'Claude Sonnet 5.5 (Medium)', quotaInfo: { remainingFraction: 0.3408, resetTime: '2026-11-30T19:35:34Z' } }
+      ]
+    }
+  }
+});
+assert.strictEqual(quotaSummary.planName, 'Pro');
+assert.strictEqual(quotaSummary.promptCredits, 500);
+assert.strictEqual(quotaSummary.pools[0].label, 'Gemini 4 / Flash');
+assert.strictEqual(quotaSummary.pools[0].remainingPct, 39);
+assert.strictEqual(quotaSummary.pools[1].label, 'Claude / GPT');
+assert.strictEqual(quotaSummary.pools[1].remainingPct, 34);
 
 // 8. startServer with noDefaultPane leaves panes empty until user chooses [S] or [N]
 (async () => {

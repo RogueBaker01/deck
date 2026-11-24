@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 const { Terminal } = require('@xterm/headless');
-const { startServer, createPane, sendGroupMessage, swapPanes, panes, GROUPS, events, commLog, saveSessionState, loadPreviousSession, restorePreviousSession, notifyWindows, scanModelUsage, formatCompactTokens } = require('./server');
+const { startServer, createPane, sendGroupMessage, swapPanes, panes, GROUPS, events, commLog, saveSessionState, loadPreviousSession, restorePreviousSession, notifyWindows, scanModelUsage, formatCompactTokens, refreshModelQuota, getModelQuota, formatResetEta } = require('./server');
 
 const GROUP_ORDER = ['isolated', 'A', 'B', 'C', 'D'];
 const RGB = {
@@ -264,6 +264,39 @@ function render() {
 
     lastSidebarCards.push({ id: p.id, rStart: sRow, rEnd: sRow + 3, pillRow: sRow, pillColStart, pillColEnd });
     sRow += 4;
+  }
+  if (sRow + 2 < rows) {
+    const quota = getModelQuota();
+    if (quota && quota.pools && quota.pools.length) {
+      const planTag = quota.planName ? ` · ${quota.planName}` : '';
+      out += moveTo(sRow, 1) + fg(RGB.focus, bold(trunc(` Cuota Restante${planTag}`, sidebarW - 1))) + fg(RGB.border, '│');
+      sRow++;
+      for (const pool of quota.pools) {
+        if (sRow + 1 >= rows) break;
+        const pct = pool.remainingPct;
+        const qCol = pct > 50 ? RGB.green : pct > 20 ? RGB.amber : RGB.coral;
+        const rightTxt = `${pct}%`;
+        const barW = 5;
+        const filled = Math.max(0, Math.min(barW, Math.round((pct / 100) * barW)));
+        const barStr = fg(qCol, '█'.repeat(filled)) + fg(RGB.border, '░'.repeat(barW - filled));
+        const eta = formatResetEta(pool.resetTime);
+        const nameW = Math.max(4, sidebarW - 4 - rightTxt.length - 1);
+        const nameStr = trunc(pool.label, nameW);
+        const padMid = ' '.repeat(Math.max(1, (sidebarW - 4) - nameStr.length - rightTxt.length));
+        out += moveTo(sRow, 1) + ' ' + fg(qCol, '•') + ' ' + fg(RGB.focus, nameStr) + padMid + fg(qCol, bold(rightTxt)) + fg(RGB.border, '│');
+        const etaTxt = eta ? ` reset ${eta}` : '';
+        out += moveTo(sRow + 1, 1) + '  ' + barStr + fg(RGB.muted, trunc(etaTxt, Math.max(1, sidebarW - 8))) + fg(RGB.border, '│');
+        sRow += 2;
+      }
+      if (sRow < rows && quota.promptCredits != null) {
+        out += moveTo(sRow, 1) + fg(RGB.muted, trunc(` Créditos: ${quota.promptCredits}P · ${quota.flowCredits ?? 0}F`, sidebarW - 1)) + fg(RGB.border, '│');
+        sRow++;
+      }
+      if (sRow < rows) {
+        out += moveTo(sRow, 1) + fg(RGB.border, '─'.repeat(sidebarW - 1) + '┤');
+        sRow++;
+      }
+    }
   }
   if (sRow + 2 < rows) {
     const usage = scanModelUsage();
@@ -668,6 +701,8 @@ async function main() {
   }
   setInterval(saveSessionState, 15000).unref();
   setInterval(scheduleRender, 5000).unref();
+  refreshModelQuota({ force: true });
+  setInterval(() => refreshModelQuota(), 45000).unref();
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
   process.stdin.resume();
   process.stdin.on('data', handleKeyInput);

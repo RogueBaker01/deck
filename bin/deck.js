@@ -1,10 +1,24 @@
 #!/usr/bin/env node
 const http = require('http');
+const fs = require('fs');
 const { execFileSync, spawn } = require('child_process');
 const path = require('path');
 
 const PORT = Number(process.env.DECK_PORT || 4777);
 const BASE = `http://127.0.0.1:${PORT}`;
+const QUOTA_FILE = path.join(__dirname, '..', '.deck-quota.json');
+
+function persistAgyQuotaEndpoint() {
+  const lsAddress = process.env.ANTIGRAVITY_LS_ADDRESS;
+  const csrfToken = process.env.ANTIGRAVITY_CSRF_TOKEN;
+  if (!lsAddress || !csrfToken) return null;
+  try {
+    let prev = {};
+    if (fs.existsSync(QUOTA_FILE)) prev = JSON.parse(fs.readFileSync(QUOTA_FILE, 'utf8'));
+    fs.writeFileSync(QUOTA_FILE, JSON.stringify({ ...prev, lsAddress, csrfToken }, null, 2));
+  } catch {}
+  return { lsAddress, csrfToken };
+}
 
 function apiRequest(method, urlPath, body) {
   return new Promise((resolve, reject) => {
@@ -52,9 +66,13 @@ function launchTerminalTUI() {
 async function main() {
   const args = process.argv.slice(2);
   const cmd = args[0] || 'open';
+  const ep = persistAgyQuotaEndpoint();
 
   if (cmd === 'open' || cmd === 'tui' || cmd === 'ui') {
     const up = await isDaemonUp();
+    if (up && ep) {
+      apiRequest('POST', '/api/quota-endpoint', ep).catch(() => {});
+    }
     if (up && !process.stdout.isTTY) {
       console.log('/deck ya está corriendo en tu terminal. Usa `deck list` o cambia a la pestaña `/deck` en Windows Terminal.');
       return;

@@ -22,6 +22,7 @@ const BRAIN_DIRS = [
   path.join(os.homedir(), '.gemini', 'antigravity', 'brain')
 ];
 const STATE_FILE = path.join(__dirname, '.deck-state.json');
+const QUOTA_FILE = path.join(__dirname, '.deck-quota.json');
 
 const GROUPS = {
   isolated: { id: 'isolated', label: 'Aislado', color: '#52525b' },
@@ -245,6 +246,146 @@ function scanModelUsage(opts = {}) {
   return res;
 }
 
+let cachedQuotaState = null;
+let lastQuotaFetchAt = 0;
+let quotaFetchInFlight = false;
+
+function formatResetEta(isoStr) {
+  if (!isoStr) return '';
+  const diffMs = Date.parse(isoStr) - Date.now();
+  if (Number.isNaN(diffMs) || diffMs <= 0) return 'ahora';
+  const totalMin = Math.floor(diffMs / 60000);
+  const days = Math.floor(totalMin / 1440);
+  const hrs = Math.floor((totalMin % 1440) / 60);
+  const mins = totalMin % 60;
+  if (days > 0) return `${days}d${hrs}h`;
+  if (hrs > 0) return `${hrs}h${mins}m`;
+  return `${mins}m`;
+}
+
+function summarizeQuotaPayload(payload) {
+  const us = payload && payload.userStatus;
+  if (!us) return null;
+  const planName = us.planStatus?.planInfo?.planName || '';
+  const promptCredits = us.planStatus?.availablePromptCredits ?? null;
+  const flowCredits = us.planStatus?.availableFlowCredits ?? null;
+  const cfgs = us.cascadeModelConfigData?.clientModelConfigs || [];
+
+  const buckets = new Map();
+  for (const c of cfgs) {
+    const q = c.quotaInfo;
+    if (!q || typeof q.remainingFraction !== 'number') continue;
+    const label = String(c.label || '');
+    let groupName = 'Otros';
+    let family = 'other';
+    if (/^Gemini 4|^Gemini [\d.]+ Flash|^Orchestrator/i.test(label)) {
+      groupName = 'Gemini 4 / Flash';
+      family = 'hydrogen';
+    } else if (/^Claude|^GPT/i.test(label)) {
+      groupName = 'Claude / GPT';
+      family = 'claude';
+    } else {
+      groupName = label.split('(')[0].trim().slice(0, 18) || 'Otros';
+    }
+    const existing = buckets.get(groupName);
+    if (!existing || q.remainingFraction < existing.remainingFraction) {
+      buckets.set(groupName, {
+        label: groupName,
+        family,
+        remainingFraction: q.remainingFraction,
+        remainingPct: Math.max(0, Math.min(100, Math.round(q.remainingFraction * 100))),
+        resetTime: q.resetTime || null
+      });
+    }
+  }
+
+  return {
+    planName,
+    promptCredits,
+    flowCredits,
+    updatedAt: Date.now(),
+    pools: Array.from(buckets.values())
+  };
+}
+
+function loadSavedQuotaCache() {
+  if (cachedQuotaState) return cachedQuotaState;
+  try {
+    if (fs.existsSync(QUOTA_FILE)) {
+      const data = JSON.parse(fs.readFileSync(QUOTA_FILE, 'utf8'));
+      if (data && data.summary) cachedQuotaState = data.summary;
+      return data;
+    }
+  } catch {}
+  return null;
+}
+
+function saveQuotaEndpoint(lsAddress, csrfToken, summary) {
+  if (!lsAddress || !csrfToken) return;
+  try {
+    const prev = loadSavedQuotaCache() || {};
+    const next = {
+      lsAddress,
+      csrfToken,
+      summary: summary || prev.summary || cachedQuotaState || null
+    };
+    fs.writeFileSync(QUOTA_FILE, JSON.stringify(next, null, 2));
+  } catch {}
+}
+
+function refreshModelQuota(opts = {}) {
+  const now = Date.now();
+  if (!opts.force && quotaFetchInFlight) return Promise.resolve(cachedQuotaState);
+  if (!opts.force && cachedQuotaState && now - lastQuotaFetchAt < 45000) {
+    return Promise.resolve(cachedQuotaState);
+  }
+
+  const saved = loadSavedQuotaCache();
+  const lsAddress = opts.lsAddress || process.env.ANTIGRAVITY_LS_ADDRESS || saved?.lsAddress;
+  const csrfToken = opts.csrfToken || process.env.ANTIGRAVITY_CSRF_TOKEN || saved?.csrfToken;
+  if (!lsAddress || !csrfToken) return Promise.resolve(cachedQuotaState);
+
+  quotaFetchInFlight = true;
+  lastQuotaFetchAt = now;
+
+  return new Promise((resolve) => {
+    const req = http.request(`http://${lsAddress}/exa.language_server_pb.LanguageServerService/GetUserStatus`, {
+      method: 'POST',
+      timeout: 2500,
+      headers: {
+        'Content-Type': 'application/json',
+        'Connect-Protocol-Version': '1',
+        'x-antigravity-csrf-token': csrfToken
+      }
+    }, (res) => {
+      let body = '';
+      res.on('data', c => { body += c; });
+      res.on('end', () => {
+        quotaFetchInFlight = false;
+        try {
+          const parsed = JSON.parse(body);
+          const summary = summarizeQuotaPayload(parsed);
+          if (summary && summary.pools.length) {
+            cachedQuotaState = summary;
+            saveQuotaEndpoint(lsAddress, csrfToken, summary);
+            broadcastState();
+          }
+        } catch {}
+        resolve(cachedQuotaState);
+      });
+    });
+    req.on('timeout', () => { req.destroy(); quotaFetchInFlight = false; resolve(cachedQuotaState); });
+    req.on('error', () => { quotaFetchInFlight = false; resolve(cachedQuotaState); });
+    req.write('{}');
+    req.end();
+  });
+}
+
+function getModelQuota() {
+  if (!cachedQuotaState) loadSavedQuotaCache();
+  return cachedQuotaState;
+}
+
 function escapeXml(s) {
   return String(s || '')
     .replace(/&/g, '&amp;')
@@ -402,7 +543,8 @@ function broadcastState() {
     groups: GROUPS,
     panes: Array.from(panes.values()).map(serializePane),
     agySessions: scanAntigravitySubagents(),
-    modelUsage: scanModelUsage()
+    modelUsage: scanModelUsage(),
+    modelQuota: getModelQuota()
   });
 }
 
@@ -715,7 +857,17 @@ const server = http.createServer(async (req, res) => {
       list = groupFilter === 'isolated' ? [] : list.filter(p => p.group === groupFilter);
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, groups: GROUPS, panes: list, agySessions: scanAntigravitySubagents(), modelUsage: scanModelUsage() }));
+    return res.end(JSON.stringify({ ok: true, groups: GROUPS, panes: list, agySessions: scanAntigravitySubagents(), modelUsage: scanModelUsage(), modelQuota: getModelQuota() }));
+  }
+
+  if (url.pathname === '/api/quota-endpoint' && req.method === 'POST') {
+    const body = await readJson(req);
+    if (body.lsAddress && body.csrfToken) {
+      saveQuotaEndpoint(body.lsAddress, body.csrfToken);
+      refreshModelQuota({ force: true, lsAddress: body.lsAddress, csrfToken: body.csrfToken });
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, modelQuota: getModelQuota() }));
   }
 
   if (url.pathname === '/api/panes' && req.method === 'POST') {
@@ -800,7 +952,8 @@ wss.on('connection', (ws) => {
     groups: GROUPS,
     panes: Array.from(panes.values()).map(serializePane),
     agySessions: scanAntigravitySubagents(),
-    modelUsage: scanModelUsage()
+    modelUsage: scanModelUsage(),
+    modelQuota: getModelQuota()
   }));
   for (const p of panes.values()) {
     if (p.buffer) ws.send(JSON.stringify({ type: 'output', id: p.id, data: p.buffer }));
@@ -854,4 +1007,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { startServer, createPane, sendGroupMessage, findPane, swapPanes, panes, GROUPS, events, commLog, saveSessionState, loadPreviousSession, restorePreviousSession, notifyWindows, scanModelUsage, formatModelName, formatCompactTokens };
+module.exports = { startServer, createPane, sendGroupMessage, findPane, swapPanes, panes, GROUPS, events, commLog, saveSessionState, loadPreviousSession, restorePreviousSession, notifyWindows, scanModelUsage, formatModelName, formatCompactTokens, refreshModelQuota, getModelQuota, summarizeQuotaPayload, formatResetEta, saveQuotaEndpoint };
