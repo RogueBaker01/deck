@@ -39,7 +39,7 @@ let lastSidebarCards = []; // [{ id, rStart, rEnd }]
 
 function ensureXterm(pane) {
   if (xterms.has(pane.id)) return xterms.get(pane.id);
-  const term = new Terminal({ cols: 80, rows: 24, allowProposedApi: true, scrollback: 500 });
+  const term = new Terminal({ cols: 80, rows: 24, allowProposedApi: true, scrollback: 2000 });
   if (pane.buffer) term.write(pane.buffer);
   xterms.set(pane.id, term);
   return term;
@@ -235,8 +235,9 @@ function render() {
     const borderRgb = pane.done ? RGB.green : pane.attention ? RGB.blue : isFocus ? RGB.focus : RGB.border;
     const gColor = RGB[pane.group] || RGB.isolated;
     const gLabel = (GROUPS[pane.group] || GROUPS.isolated).label;
+    const isScrolled = term.buffer.active.viewportY < term.buffer.active.baseY;
 
-    const hdrTxt = ` [${pane.num}] ${pane.role} (${gLabel})${pane.remoteControl ? ' [RC]' : ''} `;
+    const hdrTxt = ` [${pane.num}] ${pane.role} (${gLabel})${pane.remoteControl ? ' [RC]' : ''}${isScrolled ? ' [HISTORIAL]' : ''} `;
     const topLine = '┌' + hdrTxt.slice(0, innerW).padEnd(innerW, '─') + '┐';
     out += moveTo(r, c) + fg(borderRgb, topLine.replace(`(${gLabel})`, fg(gColor, `(${gLabel})`)));
 
@@ -275,31 +276,51 @@ function render() {
 }
 
 function handleMouse(str) {
-  // SGR mouse: \x1b[<btn;col;rowM
-  const m = str.match(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/);
-  if (!m) return false;
-  const btn = Number(m[1]), col = Number(m[2]), row = Number(m[3]), kind = m[4];
-  if (kind !== 'M' || btn !== 0) return true;
+  // SGR mouse: \x1b[<btn;col;rowM (may arrive batched)
+  const regex = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g;
+  let m;
+  let handled = false;
+  while ((m = regex.exec(str)) !== null) {
+    handled = true;
+    const btn = Number(m[1]), col = Number(m[2]), row = Number(m[3]), kind = m[4];
+    if (kind !== 'M') continue;
 
-  for (const card of lastSidebarCards) {
-    if (row >= card.rStart && row <= card.rEnd && col <= 30) {
-      focusedId = card.id;
-      const p = panes.get(focusedId);
-      if (p) { p.attention = false; p.done = false; p.notified = false; }
-      scheduleRender();
-      return true;
+    // Mouse wheel up (64) / down (65) -> scroll hovered pane
+    if (btn === 64 || btn === 65) {
+      const box = lastGridBoxes.find(b => col >= b.c && col < b.c + b.w && row >= b.r && row < b.r + b.h)
+        || lastGridBoxes.find(b => b.id === focusedId);
+      if (box) {
+        const term = xterms.get(box.id);
+        if (term) {
+          term.scrollLines(btn === 64 ? -3 : 3);
+          scheduleRender();
+        }
+      }
+      continue;
+    }
+
+    if (btn !== 0) continue;
+
+    for (const card of lastSidebarCards) {
+      if (row >= card.rStart && row <= card.rEnd && col <= 30) {
+        focusedId = card.id;
+        const p = panes.get(focusedId);
+        if (p) { p.attention = false; p.done = false; p.notified = false; }
+        scheduleRender();
+        break;
+      }
+    }
+    for (const box of lastGridBoxes) {
+      if (col >= box.c && col < box.c + box.w && row >= box.r && row < box.r + box.h) {
+        focusedId = box.id;
+        const p = panes.get(focusedId);
+        if (p) { p.attention = false; p.done = false; p.notified = false; }
+        scheduleRender();
+        break;
+      }
     }
   }
-  for (const box of lastGridBoxes) {
-    if (col >= box.c && col < box.c + box.w && row >= box.r && row < box.r + box.h) {
-      focusedId = box.id;
-      const p = panes.get(focusedId);
-      if (p) { p.attention = false; p.done = false; p.notified = false; }
-      scheduleRender();
-      return true;
-    }
-  }
-  return true;
+  return handled;
 }
 
 function handleKeyInput(buf) {
@@ -410,9 +431,13 @@ function handleKeyInput(buf) {
     return;
   }
 
-  // Forward keystroke to focused PTY
+  // Forward keystroke to focused PTY (and snap back to bottom if scrolled)
   const p = panes.get(focusedId);
   if (p) {
+    const term = xterms.get(p.id);
+    if (term && term.buffer.active.viewportY < term.buffer.active.baseY) {
+      term.scrollToBottom();
+    }
     p.attention = false;
     p.done = false;
     p.notified = false;
