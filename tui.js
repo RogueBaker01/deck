@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 const { Terminal } = require('@xterm/headless');
-const { startServer, createPane, sendGroupMessage, panes, GROUPS, events } = require('./server');
+const { startServer, createPane, sendGroupMessage, panes, GROUPS, events, saveSessionState, loadPreviousSession, restorePreviousSession, notifyWindows } = require('./server');
 
 const GROUP_ORDER = ['isolated', 'A', 'B', 'C', 'D'];
 const RGB = {
@@ -31,6 +31,7 @@ const trunc = (s, n) => {
 const xterms = new Map(); // id -> Terminal
 let focusedId = null;
 let promptMode = null; // { kind: 'role'|'send', buffer: '', targetId }
+let pendingRestore = null;
 let statusBanner = '';
 let renderTimer = null;
 let lastGridBoxes = []; // [{ id, r, c, w, h }]
@@ -254,11 +255,14 @@ function render() {
 
   // 4. Bottom Status / Prompt Bar (Row rows)
   let bottomTxt = statusBanner || ' Aislado por defecto · Clic o Tab para cambiar foco · F5 cambia grupo';
-  if (promptMode) {
+  if (pendingRestore) {
+    const names = pendingRestore.panes.map(p => p.role).slice(0, 4).join(', ');
+    bottomTxt = ` ¿Restaurar sesión anterior (${pendingRestore.panes.length} paneles: ${names})? [S] Sí, restaurar  [N] No`;
+  } else if (promptMode) {
     const label = promptMode.kind === 'role' ? 'Nuevo rol: ' : 'Enviar a compañero (rol:mensaje): ';
     bottomTxt = ' ' + bold(label) + promptMode.buffer;
   }
-  out += moveTo(rows, 1) + bg(RGB.bgTop, trunc(bottomTxt, cols));
+  out += moveTo(rows, 1) + (pendingRestore ? bg(RGB.blue, bold(trunc(bottomTxt, cols))) : bg(RGB.bgTop, trunc(bottomTxt, cols)));
 
   if (promptMode) {
     const pLen = (promptMode.kind === 'role' ? 12 : 36) + promptMode.buffer.length;
@@ -306,6 +310,23 @@ function handleKeyInput(buf) {
   if (str === '\x11') {
     cleanupAndExit();
     return;
+  }
+
+  // Restore previous session prompt ([S] / [N])
+  if (pendingRestore) {
+    if (/^[sy\r\n]$/i.test(str)) {
+      const count = restorePreviousSession(pendingRestore);
+      pendingRestore = null;
+      statusBanner = ` Sesión anterior restaurada (${count} paneles).`;
+      scheduleRender();
+      return;
+    }
+    if (/^[n\x1b]$/i.test(str)) {
+      pendingRestore = null;
+      statusBanner = ' Sesión iniciada desde cero.';
+      scheduleRender();
+      return;
+    }
   }
 
   // Prompt input mode (F6 rename or F7 send)
@@ -401,13 +422,20 @@ function handleKeyInput(buf) {
 }
 
 function cleanupAndExit() {
+  saveSessionState();
   process.stdout.write('\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l');
   for (const p of panes.values()) p.kill();
   process.exit(0);
 }
 
 async function main() {
+  pendingRestore = loadPreviousSession();
   await startServer();
+  if (pendingRestore) {
+    const names = pendingRestore.panes.map(p => p.role).slice(0, 3).join(', ');
+    notifyWindows('/deck · Sesión anterior encontrada', `¿Quieres restaurar ${pendingRestore.panes.length} paneles (${names})? Presiona [S] en /deck.`);
+  }
+  setInterval(saveSessionState, 15000).unref();
   process.stdout.write('\x1b[?1049h\x1b[?1000h\x1b[?1006h'); // alt screen + mouse SGR
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
   process.stdin.resume();

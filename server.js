@@ -17,6 +17,7 @@ try {
 const PORT = Number(process.env.DECK_PORT || 4777);
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const AGY_DIR = path.join(os.homedir(), '.gemini', 'antigravity-cli');
+const STATE_FILE = path.join(__dirname, '.deck-state.json');
 
 const GROUPS = {
   isolated: { id: 'isolated', label: 'Aislado', color: '#52525b' },
@@ -141,6 +142,52 @@ function broadcast(msg) {
   }
 }
 
+function saveSessionState() {
+  if (process.env.DECK_NO_STATE === '1') return;
+  try {
+    const snapshot = Array.from(panes.values()).map(p => ({
+      role: p.role,
+      cwd: p.cwd,
+      group: p.group,
+      remoteControl: Boolean(p.remoteControl),
+      wasAgy: Boolean(p.wasAgy || p.remoteControl || /Antigravity CLI/i.test(p.buffer))
+    }));
+    if (snapshot.length > 0) {
+      fs.writeFileSync(STATE_FILE, JSON.stringify({ savedAt: Date.now(), panes: snapshot }, null, 2));
+    }
+  } catch {}
+}
+
+function loadPreviousSession() {
+  try {
+    if (!fs.existsSync(STATE_FILE)) return null;
+    const data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    return Array.isArray(data.panes) && data.panes.length > 0 ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+function restorePreviousSession(saved) {
+  if (!saved || !Array.isArray(saved.panes) || !saved.panes.length) return 0;
+  for (const existing of Array.from(panes.values())) {
+    clearTimeout(existing.idleTimer);
+    existing.kill();
+    panes.delete(existing.id);
+  }
+  for (const item of saved.panes) {
+    createPane({
+      role: item.role,
+      cwd: item.cwd,
+      group: item.group || 'isolated',
+      remoteControl: Boolean(item.remoteControl),
+      autoAgy: Boolean(item.wasAgy),
+      continueAgy: Boolean(item.wasAgy)
+    });
+  }
+  return saved.panes.length;
+}
+
 function broadcastState() {
   broadcast({
     type: 'state',
@@ -202,6 +249,7 @@ function createPane(opts = {}) {
     outputBytes: 0,
     notified: false,
     remoteControl,
+    wasAgy: Boolean(opts.autoAgy || remoteControl),
     lastLine: 'Iniciando terminal...',
     subagents: Array.isArray(opts.subagents) ? opts.subagents : [],
     buffer: '',
@@ -299,7 +347,7 @@ function createPane(opts = {}) {
   if (opts.cmd) {
     setTimeout(() => pane.write(`${opts.cmd}\r`), 350);
   } else if (opts.autoAgy) {
-    const agyCmd = remoteControl ? 'agy --remote-control' : 'agy';
+    const agyCmd = `agy${opts.continueAgy ? ' --continue' : ''}${remoteControl ? ' --remote-control' : ''}`;
     setTimeout(() => pane.write(`${agyCmd}\r`), 350);
   }
 
@@ -500,4 +548,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { startServer, createPane, sendGroupMessage, findPane, panes, GROUPS, events };
+module.exports = { startServer, createPane, sendGroupMessage, findPane, panes, GROUPS, events, saveSessionState, loadPreviousSession, restorePreviousSession, notifyWindows };
