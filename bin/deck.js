@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 const http = require('http');
-const { spawn } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const path = require('path');
 
 const PORT = Number(process.env.DECK_PORT || 4777);
@@ -41,20 +41,12 @@ function launchTerminalTUI() {
     require(tuiPath);
     return;
   }
-  // When invoked from inside `agy` via `/deck`, open a new tab in the current Windows Terminal window
-  const psCmd = `
-    $wt = Get-Command wt.exe -ErrorAction SilentlyContinue
-    if ($wt) {
-      Start-Process wt.exe -ArgumentList @('-w', '0', 'new-tab', '--title', '/deck', 'node', '${tuiPath}')
-    } else {
-      Start-Process powershell.exe -ArgumentList @('-NoLogo', '-Command', "node '${tuiPath}'")
-    }
-  `;
-  spawn('powershell.exe', ['-NoProfile', '-Command', psCmd], {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true
-  }).unref();
+  // When invoked from inside `agy` via `/deck`, synchronously ask Windows Terminal to open a tab
+  try {
+    execFileSync('wt.exe', ['-w', '0', 'new-tab', '--title', '/deck', 'node', tuiPath], { stdio: 'ignore' });
+  } catch {
+    execFileSync('powershell.exe', ['-NoProfile', '-Command', `Start-Process node -ArgumentList '${tuiPath}'`], { stdio: 'ignore' });
+  }
 }
 
 async function main() {
