@@ -467,6 +467,9 @@ async function main() {
   process.stdin.on('data', handleKeyInput);
   process.stdout.on('resize', scheduleRender);
   process.on('SIGINT', cleanupAndExit);
+  process.on('SIGHUP', cleanupAndExit);
+  process.on('SIGTERM', cleanupAndExit);
+  process.on('exit', saveSessionState);
   render();
 }
 

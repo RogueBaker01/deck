@@ -94,18 +94,20 @@ function notifyWindows(title, message) {
   if (process.env.DECK_NO_NOTIFY === '1') return;
   const safeTitle = String(title || '/deck').replace(/'/g, "''").slice(0, 60);
   const safeMsg = String(message || 'Tarea finalizada').replace(/'/g, "''").slice(0, 140);
-  const ps = `
-    Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-    [System.Media.SystemSounds]::Asterisk.Play()
-    $n = New-Object System.Windows.Forms.NotifyIcon
-    $n.Icon = [System.Drawing.SystemIcons]::Information
-    $n.Visible = $true
-    $n.ShowBalloonTip(4000, '${safeTitle}', '${safeMsg}', [System.Windows.Forms.ToolTipIcon]::Info)
-    Start-Sleep -Milliseconds 4500
-    $n.Dispose()
-  `;
+  const ps = [
+    'Add-Type -AssemblyName System.Windows.Forms, System.Drawing',
+    '[System.Media.SystemSounds]::Asterisk.Play()',
+    '$n = New-Object System.Windows.Forms.NotifyIcon',
+    '$n.Icon = [System.Drawing.SystemIcons]::Information',
+    '$n.Visible = $true',
+    `$n.ShowBalloonTip(4000, '${safeTitle}', '${safeMsg}', [System.Windows.Forms.ToolTipIcon]::Info)`,
+    '[System.Windows.Forms.Application]::DoEvents()',
+    'Start-Sleep -Milliseconds 4200',
+    '$n.Dispose()'
+  ].join('; ');
   try {
-    spawn('powershell.exe', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', ps], {
+    const encoded = Buffer.from(ps, 'utf16le').toString('base64');
+    spawn('powershell.exe', ['-NoProfile', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], {
       detached: true,
       stdio: 'ignore',
       windowsHide: true
@@ -343,6 +345,7 @@ function createPane(opts = {}) {
   }
 
   panes.set(id, pane);
+  saveSessionState();
 
   if (opts.cmd) {
     setTimeout(() => pane.write(`${opts.cmd}\r`), 350);
